@@ -3,6 +3,9 @@ name: Build Jellyfin Tizen
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   TIZEN_STUDIO_VER: "4.5.1"
 
@@ -66,22 +69,25 @@ jobs:
 
       - name: Package .wgt
         run: |
-          mkdir -p ${GITHUB_WORKSPACE}/output
-          expect -c '
+          mkdir -p release
+          expect -c "
             set timeout -1
-            spawn ${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin/tizen package -t wgt -o ${GITHUB_WORKSPACE}/output -s Jellyfin -- .buildResult
-            expect "Author password:"
-            send -- "1234\r"
-            expect "Yes: (Y), No: (N) ?"
-            send -- "N\r"
-            expect eof
-          '
+            spawn $GITHUB_WORKSPACE/tizen-studio/tools/ide/bin/tizen package -t wgt -o $GITHUB_WORKSPACE/release -s Jellyfin -- .buildResult
+            expect \"Author password:\"
+            send -- \"1234\r\"
+            expect {
+              \"Yes: (Y), No: (N) ?\" { send -- \"N\r\"; exp_continue }
+              eof
+            }
+          "
+          echo "Built artifacts:"
+          ls -la release/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Jellyfin.wgt
-          path: output/*.wgt
+          path: release/*.wgt
           retention-days: 90
 
       - name: Create release
@@ -89,7 +95,7 @@ jobs:
         with:
           tag_name: "build-${{ github.run_number }}"
           name: "Jellyfin Tizen (screensaver fix) - Build ${{ github.run_number }}"
-          files: output/*.wgt
+          files: release/*.wgt
           body: |
             Jellyfin Tizen build with screen saver suppression fix.
 
