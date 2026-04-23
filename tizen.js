@@ -246,17 +246,19 @@
             '}';
         document.head.appendChild(oledStyleEl);
 
-        // Create overlay div behind all content
+        // Create overlay on top of all content with low opacity
+        // Uses brighter colors + low opacity so the pixel changes are
+        // detectable by the TV but don't obscure the UI
         oledOverlay = document.createElement('div');
         oledOverlay.id = 'tizen-oled-overlay';
         oledOverlay.style.cssText =
             'position:fixed;top:0;left:0;width:100%;height:100%;' +
-            'z-index:-1;pointer-events:none;' +
-            'background:linear-gradient(135deg,#0a0a12,#0d1117,#0a0f0a,#11090f,#0a0a12);' +
+            'z-index:999999;pointer-events:none;' +
+            'background:linear-gradient(135deg,#1a1a3a,#2a1a2a,#1a2a1a,#2a2a1a,#1a1a3a);' +
             'background-size:400% 400%;' +
             'animation:tizen-oled-drift 60s ease-in-out infinite;' +
-            'opacity:1;';
-        document.body.insertBefore(oledOverlay, document.body.firstChild);
+            'opacity:0.07;';
+        document.body.appendChild(oledOverlay);
         postMessage('oledOverlay', 'created');
     }
 
