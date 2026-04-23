@@ -111,6 +111,16 @@
 
             exit: function () {
                 postMessage('AppHost.exit');
+
+                // Re-enable the screen saver before exiting
+                try {
+                    webapis.appcommon.setScreenSaver(
+                        webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON
+                    );
+                } catch (e) {
+                    // Ignore errors during exit
+                }
+
                 tizen.application.getCurrentApplication().exit();
             },
 
@@ -172,10 +182,40 @@
 
         updateMediaSession: function (mediaInfo) {
             postMessage('updateMediaSession', { mediaInfo: mediaInfo });
+
+            // Suppress the Samsung screen saver during active playback
+            try {
+                webapis.appcommon.setScreenSaver(
+                    webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
+                    function (result) {
+                        postMessage('setScreenSaver', { state: 'OFF', result: result });
+                    },
+                    function (error) {
+                        postMessage('setScreenSaver', { state: 'OFF', error: JSON.stringify(error) });
+                    }
+                );
+            } catch (e) {
+                postMessage('setScreenSaver', { error: e.message });
+            }
         },
 
         hideMediaSession: function () {
             postMessage('hideMediaSession');
+
+            // Re-enable the Samsung screen saver when playback stops
+            try {
+                webapis.appcommon.setScreenSaver(
+                    webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
+                    function (result) {
+                        postMessage('setScreenSaver', { state: 'ON', result: result });
+                    },
+                    function (error) {
+                        postMessage('setScreenSaver', { state: 'ON', error: JSON.stringify(error) });
+                    }
+                );
+            } catch (e) {
+                postMessage('setScreenSaver', { error: e.message });
+            }
         }
     };
 
