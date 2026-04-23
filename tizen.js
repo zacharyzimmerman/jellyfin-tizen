@@ -275,9 +275,13 @@
         dummyVideo.loop = true;
         dummyVideo.setAttribute('playsinline', '');
         dummyVideo._tizenScreenSaver = true; // skip in MutationObserver
+        // Full-screen but invisible: the firmware likely checks that a
+        // playing video element has a meaningful layout size. Use full
+        // viewport dimensions behind all content so it passes any size
+        // check while remaining invisible to the user.
         dummyVideo.style.cssText =
-            'position:fixed;top:-1px;left:-1px;width:1px;height:1px;' +
-            'opacity:0.01;pointer-events:none;z-index:-1;';
+            'position:fixed;top:0;left:0;width:100%;height:100%;' +
+            'opacity:0.001;pointer-events:none;z-index:-9999;';
         document.body.appendChild(dummyVideo);
 
         dummyVideo.play().then(function () {
