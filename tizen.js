@@ -3,20 +3,6 @@
 
     console.log('Tizen adapter');
 
-    // Pre-fill server URL so the user doesn't have to type it on the TV
-    var DEFAULT_SERVER = 'https://movies.great-tags.com';
-    try {
-        var existingCreds = localStorage.getItem('jellyfin_credentials');
-        if (!existingCreds) {
-            localStorage.setItem('jellyfin_credentials', JSON.stringify({
-                Servers: [{ ManualAddress: DEFAULT_SERVER }]
-            }));
-            console.log('Pre-filled default server: ' + DEFAULT_SERVER);
-        }
-    } catch (e) {
-        console.log('Could not pre-fill server: ' + e.message);
-    }
-
     // Similar to jellyfin-web
     function generateDeviceId() {
         return btoa([navigator.userAgent, new Date().getTime()].join('|')).replace(/=/g, '1');
