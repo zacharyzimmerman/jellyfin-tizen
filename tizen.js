@@ -224,45 +224,63 @@
         }
     };
 
-    // OLED burn-in prevention: inject a subtle moving gradient behind the UI
-    // during audio playback. Samsung OLED TVs trigger a mandatory screensaver
-    // after 2 min of static pixels — this ensures enough pixel change to
-    // prevent that, while keeping all now-playing content visible on top.
+    // OLED burn-in prevention: inject a full-screen canvas with subtle random
+    // noise during audio playback. Samsung OLED TVs trigger a mandatory
+    // screensaver after 2 min of static pixels — the per-pixel noise ensures
+    // every pixel changes every frame, defeating the static-pixel detector
+    // while keeping all now-playing content visible underneath.
     var oledOverlay = null;
-    var oledStyleEl = null;
+
+    var oledCanvas = null;
+    var oledAnimFrame = null;
 
     function createOledOverlay() {
         if (oledOverlay) return;
 
-        // Inject CSS animation
-        oledStyleEl = document.createElement('style');
-        oledStyleEl.textContent =
-            '@keyframes tizen-oled-drift {' +
-            '  0%   { background-position: 0% 0%; }' +
-            '  25%  { background-position: 100% 50%; }' +
-            '  50%  { background-position: 50% 100%; }' +
-            '  75%  { background-position: 0% 50%; }' +
-            '  100% { background-position: 0% 0%; }' +
-            '}';
-        document.head.appendChild(oledStyleEl);
-
-        // Create overlay on top of all content with low opacity
-        // Uses brighter colors + low opacity so the pixel changes are
-        // detectable by the TV but don't obscure the UI
-        oledOverlay = document.createElement('div');
+        // Use a full-screen canvas that redraws subtle noise every frame.
+        // Samsung OLED burn-in protection detects static pixels at the
+        // firmware level — CSS animations with low opacity don't produce
+        // enough actual RGB delta. A canvas with per-pixel noise guarantees
+        // every pixel changes every frame, which the TV cannot classify as
+        // static. The noise is drawn at low alpha so it appears as a faint
+        // grain over the UI without obscuring content.
+        oledOverlay = document.createElement('canvas');
         oledOverlay.id = 'tizen-oled-overlay';
         oledOverlay.style.cssText =
             'position:fixed;top:0;left:0;width:100%;height:100%;' +
-            'z-index:999999;pointer-events:none;' +
-            'background:linear-gradient(135deg,#1a1a3a,#2a1a2a,#1a2a1a,#2a2a1a,#1a1a3a);' +
-            'background-size:400% 400%;' +
-            'animation:tizen-oled-drift 60s ease-in-out infinite;' +
-            'opacity:0.07;';
+            'z-index:999999;pointer-events:none;';
+
+        // Use a small canvas and let CSS scale it up — much cheaper than
+        // drawing millions of pixels. 64x36 gives enough noise granularity.
+        oledOverlay.width = 64;
+        oledOverlay.height = 36;
         document.body.appendChild(oledOverlay);
-        postMessage('oledOverlay', 'created');
+
+        var ctx = oledOverlay.getContext('2d');
+        var imgData = ctx.createImageData(64, 36);
+        var pixels = imgData.data;
+
+        function drawNoise() {
+            for (var i = 0; i < pixels.length; i += 4) {
+                // Random color per pixel, very low alpha (3-6 out of 255)
+                pixels[i]     = Math.random() * 255 | 0; // R
+                pixels[i + 1] = Math.random() * 255 | 0; // G
+                pixels[i + 2] = Math.random() * 255 | 0; // B
+                pixels[i + 3] = 10 + (Math.random() * 8 | 0); // A: 10-17 (~4-7%)
+            }
+            ctx.putImageData(imgData, 0, 0);
+            oledAnimFrame = requestAnimationFrame(drawNoise);
+        }
+
+        drawNoise();
+        postMessage('oledOverlay', 'created (canvas noise)');
     }
 
     function removeOledOverlay() {
+        if (oledAnimFrame) {
+            cancelAnimationFrame(oledAnimFrame);
+            oledAnimFrame = null;
+        }
         if (oledOverlay) {
             oledOverlay.remove();
             oledOverlay = null;
@@ -271,6 +289,7 @@
             oledStyleEl.remove();
             oledStyleEl = null;
         }
+        oledCanvas = null;
         postMessage('oledOverlay', 'removed');
     }
 
