@@ -66,7 +66,16 @@ jobs:
 
       - name: Package .wgt
         run: |
-          ${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin/tizen package -t wgt -o ${GITHUB_WORKSPACE}/output -- .buildResult
+          mkdir -p ${GITHUB_WORKSPACE}/output
+          expect -c '
+            set timeout -1
+            spawn ${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin/tizen package -t wgt -o ${GITHUB_WORKSPACE}/output -s Jellyfin -- .buildResult
+            expect "Author password:"
+            send -- "1234\r"
+            expect "Yes: (Y), No: (N) ?"
+            send -- "N\r"
+            expect eof
+          '
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
