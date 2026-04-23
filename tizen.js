@@ -120,6 +120,11 @@
                 } catch (e) {
                     // Ignore errors during exit
                 }
+                try {
+                    tizen.power.release('SCREEN');
+                } catch (e) {
+                    // Ignore errors during exit
+                }
 
                 tizen.application.getCurrentApplication().exit();
             },
@@ -227,30 +232,54 @@
 
     function suppressScreenSaver() {
         if (screenSaverSuppressed) return;
+        postMessage('suppressScreenSaver', 'attempting');
+
+        // Method 1: Samsung AppCommon API
         try {
             webapis.appcommon.setScreenSaver(
                 webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
                 function () { postMessage('setScreenSaver', { state: 'OFF' }); },
                 function (err) { postMessage('setScreenSaver', { state: 'OFF', error: JSON.stringify(err) }); }
             );
-            screenSaverSuppressed = true;
         } catch (e) {
             postMessage('setScreenSaver', { error: e.message });
         }
+
+        // Method 2: Tizen Power API — request SCREEN_NORMAL to prevent dimming
+        try {
+            tizen.power.request('SCREEN', 'SCREEN_NORMAL');
+            postMessage('power.request', { state: 'SCREEN_NORMAL' });
+        } catch (e) {
+            postMessage('power.request', { error: e.message });
+        }
+
+        screenSaverSuppressed = true;
     }
 
     function restoreScreenSaver() {
         if (!screenSaverSuppressed) return;
+        postMessage('restoreScreenSaver', 'attempting');
+
+        // Method 1: Samsung AppCommon API
         try {
             webapis.appcommon.setScreenSaver(
                 webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
                 function () { postMessage('setScreenSaver', { state: 'ON' }); },
                 function (err) { postMessage('setScreenSaver', { state: 'ON', error: JSON.stringify(err) }); }
             );
-            screenSaverSuppressed = false;
         } catch (e) {
             postMessage('setScreenSaver', { error: e.message });
         }
+
+        // Method 2: Release Tizen Power lock
+        try {
+            tizen.power.release('SCREEN');
+            postMessage('power.release', { state: 'SCREEN' });
+        } catch (e) {
+            postMessage('power.release', { error: e.message });
+        }
+
+        screenSaverSuppressed = false;
     }
 
     function attachMediaListeners(el) {
