@@ -224,41 +224,53 @@
         }
     };
 
-    // Screensaver bypass: play an invisible video to make Tizen's media
-    // pipeline believe video content is active. Samsung OLED TVs suppress
-    // the 2-minute screensaver when the system detects video playback at the
-    // OS level. A tiny canvas stream piped to a hidden <video> element
-    // registers as real video playback without affecting audio or UI.
+    // Screensaver bypass: play a real H.264 MP4 on a hidden <video> element.
+    // Samsung OLED TVs suppress the 2-minute screensaver only when they
+    // detect active video DECODING at the OS/media-pipeline level (confirmed
+    // by Spotify community: music videos don't trigger screensaver, audio-
+    // only does). A real H.264 file goes through the hardware decoder,
+    // which is what Samsung's firmware monitors — unlike captureStream()
+    // which may only create a software-level MediaStream.
     var dummyVideo = null;
-    var dummyCanvas = null;
-    var dummyAnimFrame = null;
+
+    // Minimal valid H.264/MP4 (~1 kB) — single black frame, enough to
+    // engage the hardware decoder when looped.
+    var DUMMY_MP4 = 'data:video/mp4;base64,' +
+        'AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAAr9tZGF0AAAC' +
+        'oAYF//+c3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDEyNSAtIEguMjY0L01QRUct' +
+        'NCBBVkMgY29kZWMgLSBDb3B5bGVmdCAyMDAzLTIwMTIgLSBodHRwOi8vd3d3LnZpZGVv' +
+        'bGFuLm9yZy94MjY0Lmh0bWwgLSBvcHRpb25zOiBjYWJhYz0xIHJlZj0zIGRlYmxvY2s9' +
+        'MTowOjAgYW5hbHlzZT0weDM6MHgxMTMgbWU9aGV4IHN1Ym1lPTcgcHN5PTEgcHN5X3Jk' +
+        'PTEuMDA6MC4wMCBtaXhlZF9yZWY9MSBtZV9yYW5nZT0xNiBjaHJvbWFfbWU9MSB0cmVs' +
+        'bGlzPTEgOHg4ZGN0PTEgY3FtPTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0xIGNo' +
+        'cm9tYV9xcF9vZmZzZXQ9LTIgdGhyZWFkcz02IGxvb2thaGVhZF90aHJlYWRzPTEgc2xp' +
+        'Y2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9j' +
+        'b21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MyBiX3B5cmFtaWQ9MiBi' +
+        'X2FkYXB0PTEgYl9iaWFzPTAgZGlyZWN0PTEgd2VpZ2h0Yj0xIG9wZW5fZ29wPTAgd2Vp' +
+        'Z2h0cD0yIGtleWludD0yNTAga2V5aW50X21pbj0yNCBzY2VuZWN1dD00MCBpbnRyYV9y' +
+        'ZWZyZXNoPTAgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBx' +
+        'Y29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBh' +
+        'cT0xOjEuMDAAgAAAAA9liIQAV/0TAAYdeBTXzg8AAALvbW9vdgAAAGxtdmhkAAAAAAAA' +
+        'AAAAAAAAAAAAD6AAAACoAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAA' +
+        'AAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAhl0cmFrAAAAXHRr' +
+        'aGQAAAAPAAAAAAAAAAAAAAABAAAAAAAAACoAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAA' +
+        'AAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAgAAAAIAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAA' +
+        'AAEAAAAqAAAAAAABAAAAAAGRbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAwAAAAAgBVxAAA' +
+        'AAAALHB2bHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABPG1pbmYA' +
+        'AAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAA' +
+        'AQAAAPxzdGJsAAAAmHN0c2QAAAAAAAAAAQAAAIhhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAA' +
+        'AAAACAAIAEgAAABIAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY' +
+        '//8AAAAyYXZjQwFkAAr/4QAZZGQACqzZX5ZcBbIAAAMAAgAAAwBgHiRLLAEABmjr48si' +
+        'wAAAABhzdHRzAAAAAAAAAAEAAAABAAACAAAAAAcc3RzYwAAAAAAAAABAAAAAQAAAAEAAAAB' +
+        'AAAAFHNOc3oAAAAAAAACtwAAAAEAAAAUc3RjbwAAAAAAAAABAAAAMAAAAGJ1ZHRhAAAAWm1l' +
+        'dGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAALWlsc3QAAAAlqXRv' +
+        'bwAAAB1kYXRhAAAAAQAAAABMYXZmNTQuNjMuMTA0';
 
     function createDummyVideo() {
         if (dummyVideo) return;
 
-        // Create a tiny offscreen canvas that changes every frame
-        dummyCanvas = document.createElement('canvas');
-        dummyCanvas.width = 2;
-        dummyCanvas.height = 2;
-        var ctx = dummyCanvas.getContext('2d');
-
-        // Animate the canvas so the stream has changing frames
-        function tick() {
-            ctx.fillStyle = 'rgb(' +
-                (Math.random() * 255 | 0) + ',' +
-                (Math.random() * 255 | 0) + ',' +
-                (Math.random() * 255 | 0) + ')';
-            ctx.fillRect(0, 0, 2, 2);
-            dummyAnimFrame = requestAnimationFrame(tick);
-        }
-        tick();
-
-        // Capture the canvas as a video stream (1 fps is enough)
-        var stream = dummyCanvas.captureStream(1);
-
-        // Create a hidden video element that plays the stream
         dummyVideo = document.createElement('video');
-        dummyVideo.srcObject = stream;
+        dummyVideo.src = DUMMY_MP4;
         dummyVideo.muted = true;
         dummyVideo.loop = true;
         dummyVideo.setAttribute('playsinline', '');
@@ -269,25 +281,19 @@
         document.body.appendChild(dummyVideo);
 
         dummyVideo.play().then(function () {
-            postMessage('dummyVideo', 'playing — screensaver should be suppressed');
+            postMessage('dummyVideo', 'playing H.264 MP4 — hardware decoder engaged');
         }).catch(function (err) {
             postMessage('dummyVideo', { error: err.message });
         });
     }
 
     function removeDummyVideo() {
-        if (dummyAnimFrame) {
-            cancelAnimationFrame(dummyAnimFrame);
-            dummyAnimFrame = null;
-        }
         if (dummyVideo) {
             dummyVideo.pause();
-            dummyVideo.srcObject = null;
+            dummyVideo.removeAttribute('src');
+            dummyVideo.load(); // release decoder resources
             dummyVideo.remove();
             dummyVideo = null;
-        }
-        if (dummyCanvas) {
-            dummyCanvas = null;
         }
         postMessage('dummyVideo', 'removed');
     }
