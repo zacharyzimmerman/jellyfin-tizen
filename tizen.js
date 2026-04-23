@@ -219,6 +219,64 @@
         }
     };
 
+    // Screen saver suppression — directly observe media elements
+    // NativeShell.updateMediaSession/hideMediaSession are only called when
+    // navigator.mediaSession is absent, but modern Tizen browsers have it,
+    // so we must listen for playback events independently.
+    var screenSaverSuppressed = false;
+
+    function suppressScreenSaver() {
+        if (screenSaverSuppressed) return;
+        try {
+            webapis.appcommon.setScreenSaver(
+                webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
+                function () { postMessage('setScreenSaver', { state: 'OFF' }); },
+                function (err) { postMessage('setScreenSaver', { state: 'OFF', error: JSON.stringify(err) }); }
+            );
+            screenSaverSuppressed = true;
+        } catch (e) {
+            postMessage('setScreenSaver', { error: e.message });
+        }
+    }
+
+    function restoreScreenSaver() {
+        if (!screenSaverSuppressed) return;
+        try {
+            webapis.appcommon.setScreenSaver(
+                webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
+                function () { postMessage('setScreenSaver', { state: 'ON' }); },
+                function (err) { postMessage('setScreenSaver', { state: 'ON', error: JSON.stringify(err) }); }
+            );
+            screenSaverSuppressed = false;
+        } catch (e) {
+            postMessage('setScreenSaver', { error: e.message });
+        }
+    }
+
+    function attachMediaListeners(el) {
+        if (el._tizenScreenSaver) return;
+        el._tizenScreenSaver = true;
+        el.addEventListener('playing', suppressScreenSaver);
+        el.addEventListener('pause', restoreScreenSaver);
+        el.addEventListener('ended', restoreScreenSaver);
+        el.addEventListener('emptied', restoreScreenSaver);
+    }
+
+    // Watch for dynamically created audio/video elements
+    var observer = new MutationObserver(function (mutations) {
+        mutations.forEach(function (m) {
+            m.addedNodes.forEach(function (node) {
+                if (node.nodeName === 'AUDIO' || node.nodeName === 'VIDEO') {
+                    attachMediaListeners(node);
+                }
+                // Also check children (e.g. a container with a media element inside)
+                if (node.querySelectorAll) {
+                    node.querySelectorAll('audio, video').forEach(attachMediaListeners);
+                }
+            });
+        });
+    });
+
     window.addEventListener('load', function () {
         tizen.tvinputdevice.registerKey('MediaPlay');
         tizen.tvinputdevice.registerKey('MediaPause');
@@ -227,6 +285,12 @@
         tizen.tvinputdevice.registerKey('MediaTrackNext');
         tizen.tvinputdevice.registerKey('MediaRewind');
         tizen.tvinputdevice.registerKey('MediaFastForward');
+
+        // Attach to any media elements already in the DOM
+        document.querySelectorAll('audio, video').forEach(attachMediaListeners);
+
+        // Observe for new media elements added later
+        observer.observe(document.body, { childList: true, subtree: true });
     });
 
     function updateKeys() {
