@@ -224,6 +224,54 @@
         }
     };
 
+    // OLED burn-in prevention: inject a subtle moving gradient behind the UI
+    // during audio playback. Samsung OLED TVs trigger a mandatory screensaver
+    // after 2 min of static pixels — this ensures enough pixel change to
+    // prevent that, while keeping all now-playing content visible on top.
+    var oledOverlay = null;
+    var oledStyleEl = null;
+
+    function createOledOverlay() {
+        if (oledOverlay) return;
+
+        // Inject CSS animation
+        oledStyleEl = document.createElement('style');
+        oledStyleEl.textContent =
+            '@keyframes tizen-oled-drift {' +
+            '  0%   { background-position: 0% 0%; }' +
+            '  25%  { background-position: 100% 50%; }' +
+            '  50%  { background-position: 50% 100%; }' +
+            '  75%  { background-position: 0% 50%; }' +
+            '  100% { background-position: 0% 0%; }' +
+            '}';
+        document.head.appendChild(oledStyleEl);
+
+        // Create overlay div behind all content
+        oledOverlay = document.createElement('div');
+        oledOverlay.id = 'tizen-oled-overlay';
+        oledOverlay.style.cssText =
+            'position:fixed;top:0;left:0;width:100%;height:100%;' +
+            'z-index:-1;pointer-events:none;' +
+            'background:linear-gradient(135deg,#0a0a12,#0d1117,#0a0f0a,#11090f,#0a0a12);' +
+            'background-size:400% 400%;' +
+            'animation:tizen-oled-drift 60s ease-in-out infinite;' +
+            'opacity:1;';
+        document.body.insertBefore(oledOverlay, document.body.firstChild);
+        postMessage('oledOverlay', 'created');
+    }
+
+    function removeOledOverlay() {
+        if (oledOverlay) {
+            oledOverlay.remove();
+            oledOverlay = null;
+        }
+        if (oledStyleEl) {
+            oledStyleEl.remove();
+            oledStyleEl = null;
+        }
+        postMessage('oledOverlay', 'removed');
+    }
+
     // Screen saver suppression — directly observe media elements
     // NativeShell.updateMediaSession/hideMediaSession are only called when
     // navigator.mediaSession is absent, but modern Tizen browsers have it,
@@ -253,6 +301,9 @@
             postMessage('power.request', { error: e.message });
         }
 
+        // Method 3: OLED pixel movement — subtle background gradient animation
+        createOledOverlay();
+
         screenSaverSuppressed = true;
     }
 
@@ -278,6 +329,9 @@
         } catch (e) {
             postMessage('power.release', { error: e.message });
         }
+
+        // Method 3: Remove OLED overlay
+        removeOledOverlay();
 
         screenSaverSuppressed = false;
     }
