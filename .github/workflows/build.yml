@@ -40,7 +40,7 @@ jobs:
       - name: Setup Tizen Certificate
         run: |
           ${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin/tizen certificate -a Jellyfin -p 1234 -c NZ -s Auckland -ct Auckland -o Tizen -n Jellyfin -e jellyfin@example.org -f tizencert
-          ${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin/tizen security-profiles add -n Jellyfin -a "${GITHUB_WORKSPACE}/tizencert.p12" -p 1234
+          ${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin/tizen security-profiles add -n Jellyfin -a "${GITHUB_WORKSPACE}/tizen-studio-data/keystore/author/tizencert.p12" -p 1234
           ${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin/tizen cli-config "profiles.path=${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml"
           chmod 755 "${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml"
 
@@ -60,7 +60,7 @@ jobs:
 
       - name: Fix certificate passwords
         run: |
-          sed -i "s|${GITHUB_WORKSPACE}/tizencert.pwd|1234|g" ${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml
+          sed -i "s|${GITHUB_WORKSPACE}/tizen-studio-data/keystore/author/tizencert.pwd|1234|g" ${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml
           sed -i "s|${GITHUB_WORKSPACE}/tizen-studio-data/tools/certificate-generator/certificates/distributor/tizen-distributor-signer.pwd|tizenpkcs12passfordsigner|g" ${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml
           sed -i 's|password=""|password="tizenpkcs12passfordsigner"|g' ${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml
 
