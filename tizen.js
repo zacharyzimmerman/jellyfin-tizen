@@ -303,6 +303,34 @@
     // navigator.mediaSession is absent, but modern Tizen browsers have it,
     // so we must listen for playback events independently.
     var screenSaverSuppressed = false;
+    var keepAliveTimer = null;
+
+    // Method 4: Simulate user activity by dispatching a synthetic key event
+    // every 90 seconds. The OLED screensaver activates after 2 minutes of
+    // no user input — a periodic keypress resets that timer. Uses
+    // ColorF0Red (F1 color key) which has no side-effects in Jellyfin.
+    function startKeepAlive() {
+        if (keepAliveTimer) return;
+        keepAliveTimer = setInterval(function () {
+            var ev = new KeyboardEvent('keydown', {
+                key: 'ColorF0Red',
+                code: 'ColorF0Red',
+                keyCode: 403,
+                bubbles: true,
+                cancelable: true
+            });
+            document.dispatchEvent(ev);
+            postMessage('keepAlive', 'dispatched synthetic keydown (ColorF0Red)');
+        }, 90000); // every 90 seconds
+    }
+
+    function stopKeepAlive() {
+        if (keepAliveTimer) {
+            clearInterval(keepAliveTimer);
+            keepAliveTimer = null;
+            postMessage('keepAlive', 'stopped');
+        }
+    }
 
     function suppressScreenSaver() {
         if (screenSaverSuppressed) return;
@@ -327,9 +355,11 @@
             postMessage('power.request', { error: e.message });
         }
 
-        // Method 3: Hidden video stream — Tizen suppresses the screensaver
-        // when it detects an active video element in the playing state
+        // Method 3: Hidden H.264 MP4 — engages hardware video decoder
         createDummyVideo();
+
+        // Method 4: Periodic synthetic keypress — resets activity timer
+        startKeepAlive();
 
         screenSaverSuppressed = true;
     }
@@ -359,6 +389,9 @@
 
         // Method 3: Stop dummy video
         removeDummyVideo();
+
+        // Method 4: Stop synthetic keypress
+        stopKeepAlive();
 
         screenSaverSuppressed = false;
     }
