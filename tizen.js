@@ -224,82 +224,109 @@
         }
     };
 
-    // Screensaver bypass: play a real H.264 MP4 on a hidden <video> element.
-    // Samsung OLED TVs suppress the 2-minute screensaver only when they
-    // detect active video DECODING at the OS/media-pipeline level (confirmed
-    // by Spotify community: music videos don't trigger screensaver, audio-
-    // only does). A real H.264 file goes through the hardware decoder,
-    // which is what Samsung's firmware monitors — unlike captureStream()
-    // which may only create a software-level MediaStream.
-    var dummyVideo = null;
+    // Screensaver bypass: play a real video from the Jellyfin server in a
+    // visible mini-player during audio playback. Samsung OLED firmware only
+    // suppresses the 2-min screensaver when it detects real video playback
+    // through the standard media pipeline — data URIs, hidden elements, and
+    // API calls all failed. A visible muted video is the nuclear option that
+    // we know works because Jellyfin's own video playback suppresses it.
+    var pipVideo = null;
+    var pipContainer = null;
 
-    // Minimal valid H.264/MP4 (~1 kB) — single black frame, enough to
-    // engage the hardware decoder when looped.
-    var DUMMY_MP4 = 'data:video/mp4;base64,' +
-        'AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAAr9tZGF0AAAC' +
-        'oAYF//+c3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDEyNSAtIEguMjY0L01QRUct' +
-        'NCBBVkMgY29kZWMgLSBDb3B5bGVmdCAyMDAzLTIwMTIgLSBodHRwOi8vd3d3LnZpZGVv' +
-        'bGFuLm9yZy94MjY0Lmh0bWwgLSBvcHRpb25zOiBjYWJhYz0xIHJlZj0zIGRlYmxvY2s9' +
-        'MTowOjAgYW5hbHlzZT0weDM6MHgxMTMgbWU9aGV4IHN1Ym1lPTcgcHN5PTEgcHN5X3Jk' +
-        'PTEuMDA6MC4wMCBtaXhlZF9yZWY9MSBtZV9yYW5nZT0xNiBjaHJvbWFfbWU9MSB0cmVs' +
-        'bGlzPTEgOHg4ZGN0PTEgY3FtPTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0xIGNo' +
-        'cm9tYV9xcF9vZmZzZXQ9LTIgdGhyZWFkcz02IGxvb2thaGVhZF90aHJlYWRzPTEgc2xp' +
-        'Y2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9j' +
-        'b21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MyBiX3B5cmFtaWQ9MiBi' +
-        'X2FkYXB0PTEgYl9iaWFzPTAgZGlyZWN0PTEgd2VpZ2h0Yj0xIG9wZW5fZ29wPTAgd2Vp' +
-        'Z2h0cD0yIGtleWludD0yNTAga2V5aW50X21pbj0yNCBzY2VuZWN1dD00MCBpbnRyYV9y' +
-        'ZWZyZXNoPTAgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBx' +
-        'Y29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBh' +
-        'cT0xOjEuMDAAgAAAAA9liIQAV/0TAAYdeBTXzg8AAALvbW9vdgAAAGxtdmhkAAAAAAAA' +
-        'AAAAAAAAAAAAD6AAAACoAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAA' +
-        'AAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAhl0cmFrAAAAXHRr' +
-        'aGQAAAAPAAAAAAAAAAAAAAABAAAAAAAAACoAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAA' +
-        'AAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAgAAAAIAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAA' +
-        'AAEAAAAqAAAAAAABAAAAAAGRbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAwAAAAAgBVxAAA' +
-        'AAAALHB2bHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABPG1pbmYA' +
-        'AAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAA' +
-        'AQAAAPxzdGJsAAAAmHN0c2QAAAAAAAAAAQAAAIhhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAA' +
-        'AAAACAAIAEgAAABIAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAY' +
-        '//8AAAAyYXZjQwFkAAr/4QAZZGQACqzZX5ZcBbIAAAMAAgAAAwBgHiRLLAEABmjr48si' +
-        'wAAAABhzdHRzAAAAAAAAAAEAAAABAAACAAAAAAcc3RzYwAAAAAAAAABAAAAAQAAAAEAAAAB' +
-        'AAAAFHNOc3oAAAAAAAACtwAAAAEAAAAUc3RjbwAAAAAAAAABAAAAMAAAAGJ1ZHRhAAAAWm1l' +
-        'dGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAALWlsc3QAAAAlqXRv' +
-        'bwAAAB1kYXRhAAAAAQAAAABMYXZmNTQuNjMuMTA0';
+    function getJellyfinCredentials() {
+        // jellyfin-web stores auth in the 'jellyfin_credentials' key
+        try {
+            var creds = JSON.parse(localStorage.getItem('jellyfin_credentials'));
+            if (creds && creds.Servers && creds.Servers.length > 0) {
+                var server = creds.Servers[0];
+                return {
+                    serverUrl: server.ManualAddress || server.LocalAddress || server.RemoteAddress,
+                    token: server.AccessToken,
+                    userId: server.UserId
+                };
+            }
+        } catch (e) {
+            postMessage('pipVideo', { error: 'Failed to read credentials: ' + e.message });
+        }
+        return null;
+    }
 
-    function createDummyVideo() {
-        if (dummyVideo) return;
-
-        dummyVideo = document.createElement('video');
-        dummyVideo.src = DUMMY_MP4;
-        dummyVideo.muted = true;
-        dummyVideo.loop = true;
-        dummyVideo.setAttribute('playsinline', '');
-        dummyVideo._tizenScreenSaver = true; // skip in MutationObserver
-        // Full-screen but invisible: the firmware likely checks that a
-        // playing video element has a meaningful layout size. Use full
-        // viewport dimensions behind all content so it passes any size
-        // check while remaining invisible to the user.
-        dummyVideo.style.cssText =
-            'position:fixed;top:0;left:0;width:100%;height:100%;' +
-            'opacity:0.001;pointer-events:none;z-index:-9999;';
-        document.body.appendChild(dummyVideo);
-
-        dummyVideo.play().then(function () {
-            postMessage('dummyVideo', 'playing H.264 MP4 — hardware decoder engaged');
-        }).catch(function (err) {
-            postMessage('dummyVideo', { error: err.message });
+    function fetchRandomVideoUrl(creds) {
+        // Ask Jellyfin for a random video item
+        var url = creds.serverUrl + '/Items?IncludeItemTypes=Movie,Episode&Recursive=true' +
+            '&SortBy=Random&Limit=1&Fields=Path&UserId=' + creds.userId;
+        return fetch(url, {
+            headers: { 'X-Emby-Token': creds.token }
+        })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+            if (data.Items && data.Items.length > 0) {
+                var item = data.Items[0];
+                // Build a direct stream URL
+                var streamUrl = creds.serverUrl + '/Videos/' + item.Id + '/stream?Static=true&mediaSourceId=' +
+                    item.Id + '&api_key=' + creds.token;
+                postMessage('pipVideo', { itemName: item.Name, itemId: item.Id });
+                return streamUrl;
+            }
+            return null;
         });
     }
 
-    function removeDummyVideo() {
-        if (dummyVideo) {
-            dummyVideo.pause();
-            dummyVideo.removeAttribute('src');
-            dummyVideo.load(); // release decoder resources
-            dummyVideo.remove();
-            dummyVideo = null;
+    function createPipVideo() {
+        if (pipVideo) return;
+
+        var creds = getJellyfinCredentials();
+        if (!creds) {
+            postMessage('pipVideo', 'no credentials found — cannot create PiP');
+            return;
         }
-        postMessage('dummyVideo', 'removed');
+
+        fetchRandomVideoUrl(creds).then(function (streamUrl) {
+            if (!streamUrl) {
+                postMessage('pipVideo', 'no video items found on server');
+                return;
+            }
+
+            // Container with rounded corners and subtle border
+            pipContainer = document.createElement('div');
+            pipContainer.id = 'tizen-pip-screensaver';
+            pipContainer.style.cssText =
+                'position:fixed;bottom:20px;right:20px;width:192px;height:108px;' +
+                'border-radius:8px;overflow:hidden;z-index:999998;' +
+                'box-shadow:0 2px 8px rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.1);';
+            document.body.appendChild(pipContainer);
+
+            pipVideo = document.createElement('video');
+            pipVideo.src = streamUrl;
+            pipVideo.muted = true;
+            pipVideo.loop = true;
+            pipVideo.setAttribute('playsinline', '');
+            pipVideo._tizenScreenSaver = true; // skip in MutationObserver
+            pipVideo.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+            pipContainer.appendChild(pipVideo);
+
+            pipVideo.play().then(function () {
+                postMessage('pipVideo', 'playing — screensaver should be suppressed');
+            }).catch(function (err) {
+                postMessage('pipVideo', { error: err.message });
+            });
+        }).catch(function (err) {
+            postMessage('pipVideo', { error: 'fetch failed: ' + err.message });
+        });
+    }
+
+    function removePipVideo() {
+        if (pipVideo) {
+            pipVideo.pause();
+            pipVideo.removeAttribute('src');
+            pipVideo.load();
+            pipVideo = null;
+        }
+        if (pipContainer) {
+            pipContainer.remove();
+            pipContainer = null;
+        }
+        postMessage('pipVideo', 'removed');
     }
 
     // Screen saver suppression — directly observe media elements
@@ -307,40 +334,12 @@
     // navigator.mediaSession is absent, but modern Tizen browsers have it,
     // so we must listen for playback events independently.
     var screenSaverSuppressed = false;
-    var keepAliveTimer = null;
-
-    // Method 4: Simulate user activity by dispatching a synthetic key event
-    // every 90 seconds. The OLED screensaver activates after 2 minutes of
-    // no user input — a periodic keypress resets that timer. Uses
-    // ColorF0Red (F1 color key) which has no side-effects in Jellyfin.
-    function startKeepAlive() {
-        if (keepAliveTimer) return;
-        keepAliveTimer = setInterval(function () {
-            var ev = new KeyboardEvent('keydown', {
-                key: 'ColorF0Red',
-                code: 'ColorF0Red',
-                keyCode: 403,
-                bubbles: true,
-                cancelable: true
-            });
-            document.dispatchEvent(ev);
-            postMessage('keepAlive', 'dispatched synthetic keydown (ColorF0Red)');
-        }, 90000); // every 90 seconds
-    }
-
-    function stopKeepAlive() {
-        if (keepAliveTimer) {
-            clearInterval(keepAliveTimer);
-            keepAliveTimer = null;
-            postMessage('keepAlive', 'stopped');
-        }
-    }
 
     function suppressScreenSaver() {
         if (screenSaverSuppressed) return;
         postMessage('suppressScreenSaver', 'attempting');
 
-        // Method 1: Samsung AppCommon API
+        // Samsung AppCommon API (may not work without Auto Protection Time)
         try {
             webapis.appcommon.setScreenSaver(
                 webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
@@ -351,19 +350,13 @@
             postMessage('setScreenSaver', { error: e.message });
         }
 
-        // Method 2: Tizen Power API — request SCREEN_NORMAL to prevent dimming
+        // Tizen Power API
         try {
             tizen.power.request('SCREEN', 'SCREEN_NORMAL');
-            postMessage('power.request', { state: 'SCREEN_NORMAL' });
-        } catch (e) {
-            postMessage('power.request', { error: e.message });
-        }
+        } catch (e) { /* ignore */ }
 
-        // Method 3: Hidden H.264 MP4 — engages hardware video decoder
-        createDummyVideo();
-
-        // Method 4: Periodic synthetic keypress — resets activity timer
-        startKeepAlive();
+        // PiP video — real video from server, visible in bottom-right
+        createPipVideo();
 
         screenSaverSuppressed = true;
     }
@@ -372,30 +365,19 @@
         if (!screenSaverSuppressed) return;
         postMessage('restoreScreenSaver', 'attempting');
 
-        // Method 1: Samsung AppCommon API
         try {
             webapis.appcommon.setScreenSaver(
                 webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
                 function () { postMessage('setScreenSaver', { state: 'ON' }); },
                 function (err) { postMessage('setScreenSaver', { state: 'ON', error: JSON.stringify(err) }); }
             );
-        } catch (e) {
-            postMessage('setScreenSaver', { error: e.message });
-        }
+        } catch (e) { /* ignore */ }
 
-        // Method 2: Release Tizen Power lock
         try {
             tizen.power.release('SCREEN');
-            postMessage('power.release', { state: 'SCREEN' });
-        } catch (e) {
-            postMessage('power.release', { error: e.message });
-        }
+        } catch (e) { /* ignore */ }
 
-        // Method 3: Stop dummy video
-        removeDummyVideo();
-
-        // Method 4: Stop synthetic keypress
-        stopKeepAlive();
+        removePipVideo();
 
         screenSaverSuppressed = false;
     }
