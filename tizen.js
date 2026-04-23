@@ -3,6 +3,20 @@
 
     console.log('Tizen adapter');
 
+    // Pre-fill server URL so the user doesn't have to type it on the TV
+    var DEFAULT_SERVER = 'https://movies.great-tags.com';
+    try {
+        var existingCreds = localStorage.getItem('jellyfin_credentials');
+        if (!existingCreds) {
+            localStorage.setItem('jellyfin_credentials', JSON.stringify({
+                Servers: [{ ManualAddress: DEFAULT_SERVER }]
+            }));
+            console.log('Pre-filled default server: ' + DEFAULT_SERVER);
+        }
+    } catch (e) {
+        console.log('Could not pre-fill server: ' + e.message);
+    }
+
     // Similar to jellyfin-web
     function generateDeviceId() {
         return btoa([navigator.userAgent, new Date().getTime()].join('|')).replace(/=/g, '1');
@@ -252,20 +266,23 @@
     }
 
     function fetchRandomVideoUrl(creds) {
-        // Ask Jellyfin for a random video item
-        var url = creds.serverUrl + '/Items?IncludeItemTypes=Movie,Episode&Recursive=true' +
-            '&SortBy=Random&Limit=1&Fields=Path&UserId=' + creds.userId;
+        // Ask Jellyfin for a random video item — use MediaTypes=Video to
+        // ensure we only get actual video content, not audio-only items
+        var url = creds.serverUrl + '/Items?MediaTypes=Video&IncludeItemTypes=Movie,Episode' +
+            '&Recursive=true&SortBy=Random&Limit=1&UserId=' + creds.userId;
+        postMessage('pipVideo', { fetchUrl: url });
         return fetch(url, {
             headers: { 'X-Emby-Token': creds.token }
         })
         .then(function (res) { return res.json(); })
         .then(function (data) {
+            postMessage('pipVideo', { itemCount: data.Items ? data.Items.length : 0 });
             if (data.Items && data.Items.length > 0) {
                 var item = data.Items[0];
                 // Build a direct stream URL
                 var streamUrl = creds.serverUrl + '/Videos/' + item.Id + '/stream?Static=true&mediaSourceId=' +
                     item.Id + '&api_key=' + creds.token;
-                postMessage('pipVideo', { itemName: item.Name, itemId: item.Id });
+                postMessage('pipVideo', { itemName: item.Name, itemId: item.Id, streamUrl: streamUrl });
                 return streamUrl;
             }
             return null;
@@ -301,8 +318,16 @@
             pipVideo.muted = true;
             pipVideo.loop = true;
             pipVideo.setAttribute('playsinline', '');
+            pipVideo.crossOrigin = 'anonymous';
             pipVideo._tizenScreenSaver = true; // skip in MutationObserver
             pipVideo.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+            pipVideo.addEventListener('error', function () {
+                var e = pipVideo.error;
+                postMessage('pipVideo', { videoError: e ? e.code + ': ' + e.message : 'unknown' });
+            });
+            pipVideo.addEventListener('loadeddata', function () {
+                postMessage('pipVideo', 'loadeddata — video frames ready');
+            });
             pipContainer.appendChild(pipVideo);
 
             pipVideo.play().then(function () {
