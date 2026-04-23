@@ -224,73 +224,72 @@
         }
     };
 
-    // OLED burn-in prevention: inject a full-screen canvas with subtle random
-    // noise during audio playback. Samsung OLED TVs trigger a mandatory
-    // screensaver after 2 min of static pixels — the per-pixel noise ensures
-    // every pixel changes every frame, defeating the static-pixel detector
-    // while keeping all now-playing content visible underneath.
-    var oledOverlay = null;
+    // Screensaver bypass: play an invisible video to make Tizen's media
+    // pipeline believe video content is active. Samsung OLED TVs suppress
+    // the 2-minute screensaver when the system detects video playback at the
+    // OS level. A tiny canvas stream piped to a hidden <video> element
+    // registers as real video playback without affecting audio or UI.
+    var dummyVideo = null;
+    var dummyCanvas = null;
+    var dummyAnimFrame = null;
 
-    var oledCanvas = null;
-    var oledAnimFrame = null;
+    function createDummyVideo() {
+        if (dummyVideo) return;
 
-    function createOledOverlay() {
-        if (oledOverlay) return;
+        // Create a tiny offscreen canvas that changes every frame
+        dummyCanvas = document.createElement('canvas');
+        dummyCanvas.width = 2;
+        dummyCanvas.height = 2;
+        var ctx = dummyCanvas.getContext('2d');
 
-        // Use a full-screen canvas that redraws subtle noise every frame.
-        // Samsung OLED burn-in protection detects static pixels at the
-        // firmware level — CSS animations with low opacity don't produce
-        // enough actual RGB delta. A canvas with per-pixel noise guarantees
-        // every pixel changes every frame, which the TV cannot classify as
-        // static. The noise is drawn at low alpha so it appears as a faint
-        // grain over the UI without obscuring content.
-        oledOverlay = document.createElement('canvas');
-        oledOverlay.id = 'tizen-oled-overlay';
-        oledOverlay.style.cssText =
-            'position:fixed;top:0;left:0;width:100%;height:100%;' +
-            'z-index:999999;pointer-events:none;';
-
-        // Use a small canvas and let CSS scale it up — much cheaper than
-        // drawing millions of pixels. 64x36 gives enough noise granularity.
-        oledOverlay.width = 64;
-        oledOverlay.height = 36;
-        document.body.appendChild(oledOverlay);
-
-        var ctx = oledOverlay.getContext('2d');
-        var imgData = ctx.createImageData(64, 36);
-        var pixels = imgData.data;
-
-        function drawNoise() {
-            for (var i = 0; i < pixels.length; i += 4) {
-                // Random color per pixel, very low alpha (3-6 out of 255)
-                pixels[i]     = Math.random() * 255 | 0; // R
-                pixels[i + 1] = Math.random() * 255 | 0; // G
-                pixels[i + 2] = Math.random() * 255 | 0; // B
-                pixels[i + 3] = 10 + (Math.random() * 8 | 0); // A: 10-17 (~4-7%)
-            }
-            ctx.putImageData(imgData, 0, 0);
-            oledAnimFrame = requestAnimationFrame(drawNoise);
+        // Animate the canvas so the stream has changing frames
+        function tick() {
+            ctx.fillStyle = 'rgb(' +
+                (Math.random() * 255 | 0) + ',' +
+                (Math.random() * 255 | 0) + ',' +
+                (Math.random() * 255 | 0) + ')';
+            ctx.fillRect(0, 0, 2, 2);
+            dummyAnimFrame = requestAnimationFrame(tick);
         }
+        tick();
 
-        drawNoise();
-        postMessage('oledOverlay', 'created (canvas noise)');
+        // Capture the canvas as a video stream (1 fps is enough)
+        var stream = dummyCanvas.captureStream(1);
+
+        // Create a hidden video element that plays the stream
+        dummyVideo = document.createElement('video');
+        dummyVideo.srcObject = stream;
+        dummyVideo.muted = true;
+        dummyVideo.loop = true;
+        dummyVideo.setAttribute('playsinline', '');
+        dummyVideo._tizenScreenSaver = true; // skip in MutationObserver
+        dummyVideo.style.cssText =
+            'position:fixed;top:-1px;left:-1px;width:1px;height:1px;' +
+            'opacity:0.01;pointer-events:none;z-index:-1;';
+        document.body.appendChild(dummyVideo);
+
+        dummyVideo.play().then(function () {
+            postMessage('dummyVideo', 'playing — screensaver should be suppressed');
+        }).catch(function (err) {
+            postMessage('dummyVideo', { error: err.message });
+        });
     }
 
-    function removeOledOverlay() {
-        if (oledAnimFrame) {
-            cancelAnimationFrame(oledAnimFrame);
-            oledAnimFrame = null;
+    function removeDummyVideo() {
+        if (dummyAnimFrame) {
+            cancelAnimationFrame(dummyAnimFrame);
+            dummyAnimFrame = null;
         }
-        if (oledOverlay) {
-            oledOverlay.remove();
-            oledOverlay = null;
+        if (dummyVideo) {
+            dummyVideo.pause();
+            dummyVideo.srcObject = null;
+            dummyVideo.remove();
+            dummyVideo = null;
         }
-        if (oledStyleEl) {
-            oledStyleEl.remove();
-            oledStyleEl = null;
+        if (dummyCanvas) {
+            dummyCanvas = null;
         }
-        oledCanvas = null;
-        postMessage('oledOverlay', 'removed');
+        postMessage('dummyVideo', 'removed');
     }
 
     // Screen saver suppression — directly observe media elements
@@ -322,8 +321,9 @@
             postMessage('power.request', { error: e.message });
         }
 
-        // Method 3: OLED pixel movement — subtle background gradient animation
-        createOledOverlay();
+        // Method 3: Hidden video stream — Tizen suppresses the screensaver
+        // when it detects an active video element in the playing state
+        createDummyVideo();
 
         screenSaverSuppressed = true;
     }
@@ -351,8 +351,8 @@
             postMessage('power.release', { error: e.message });
         }
 
-        // Method 3: Remove OLED overlay
-        removeOledOverlay();
+        // Method 3: Stop dummy video
+        removeDummyVideo();
 
         screenSaverSuppressed = false;
     }
