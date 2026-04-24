@@ -16,10 +16,34 @@
     // pre-baked H.264 black video frames in a single SourceBuffer, engaging
     // the hardware video decoder and suppressing the screensaver.
 
-    // Pre-baked H.264 elementary stream: 16x16 black, baseline profile, 1fps
+    // Pre-baked H.264 elementary stream: 128x128 black, constrained baseline, level 1.3, 1fps
     // Contains SPS + PPS + SEI + 5 IDR frames. We extract SPS+PPS+IDR for
     // repeating as keyframes alongside audio data.
-    var H264_BASE64 = 'AAAAAWdCwAraewEQAAADABAAAAMAIPEiagAAAAFozgGXIAAAAQYF//9P3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMyAwNDgwY2IwIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTAgcmVmPTEgZGVibG9jaz0wOjA6MCBhbmFseXNlPTA6MCBtZT1kaWEgc3VibWU9MCBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0wIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MCA4eDhkY3Q9MCBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0wIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0wIGtleWludD0yNTAga2V5aW50X21pbj0xIHNjZW5lY3V0PTAgaW50cmFfcmVmcmVzaD0wIHJjPWNyZiBtYnRyZWU9MCBjcmY9NTEuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0wAIAAAAFliIQ6JigAFcAAAAABQZogFKUAAAABQZpAFaUAAAABQZpgFaUAAAABQZqAFaU=';
+    // Codec string: avc1.42c00d (Constrained Baseline, Level 1.3)
+    var H264_BASE64 = 'AAAAAWdCwA3cIEbARAAAAwAEAAADAAg8UK4AAAABaM4BlEyAAAABBgX//1zcRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIzIDA0ODBjYjAgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MSBkZWJsb2NrPTE6LTM6LTMgYW5hbHlzZT0weDE6MHgxMTEgbWU9aGV4IHN1Ym1lPTcgcHN5PTEgcHN5X3JkPTIuMDA6MC43MCBtaXhlZF9yZWY9MCBtZV9yYW5nZT0xNiBjaHJvbWFfbWU9MSB0cmVsbGlzPTEgOHg4ZGN0PTAgY3FtPTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0xIGNocm9tYV9xcF9vZmZzZXQ9LTQgdGhyZWFkcz00IGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MCB3ZWlnaHRwPTAga2V5aW50PTEga2V5aW50X21pbj0xIHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByYz1jcmYgbWJ0cmVlPTAgY3JmPTUxLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjIwAIAAAAFliIQFc5yYoAAhIybk5OTk5OTrdddddddddddddddddddddddddddddddddddddddddddddddddddddddeAAAAAWdCwA3cIEbARAAAAwAEAAADAAg8UK4AAAABaM4BlEyAAAABZYiCAIM5yYoAAk1ycnJycnJyddddddddddddddddddddddddddddddddddddddddddddddddddddddddeAAAAAFnQsAN3CBGwEQAAAMABAAAAwAIPFCuAAAAAWjOAZRMgAAAAWWIhAIM5yYoAAk1ycnJycnJyddddddddddddddddddddddddddddddddddddddddddddddddddddddddeAAAAABZ0LADdwgRsBEAAADAAQAAAMACDxQrgAAAAFozgGUTIAAAAFliIIAgznJigACTXJycnJycnJ111111111111111111111111111111111111111111111111111111114AAAAAWdCwA3cIEbARAAAAwAEAAADAAg8UK4AAAABaM4BlEyAAAABZYiEAgznJigACTXJycnJycnJ111111111111111111111111111111111111111111111111111111114A==';
+
+    // Run MSE codec diagnostics at startup (results visible in TV debug console)
+    (function diagnoseMSE() {
+        var codecs = [
+            'video/mp4; codecs="avc1.42c00d"',
+            'video/mp4; codecs="avc1.42c00d,mp4a.40.2"',
+            'video/mp4; codecs="avc1.42E01E"',
+            'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
+            'video/mp4; codecs="avc1.4D401E"',
+            'video/mp4; codecs="avc1.640028"',
+            'audio/mp4; codecs="mp4a.40.2"',
+            'video/mp4; codecs="mp4a.40.2"',
+            'video/mp4',
+            'audio/mp4'
+        ];
+        var hasMS = typeof MediaSource !== 'undefined';
+        console.log('[TIZEN-DIAG] MediaSource available:', hasMS);
+        if (hasMS) {
+            codecs.forEach(function (c) {
+                console.log('[TIZEN-DIAG] isTypeSupported(' + c + '):', MediaSource.isTypeSupported(c));
+            });
+        }
+    })();
 
     function base64ToUint8Array(base64) {
         var binary = atob(base64);
@@ -107,6 +131,9 @@
     var activeJMuxer = null;
     var activeFetchController = null;
 
+    // Track the native src descriptor once for reuse in fallback
+    var nativeSrcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+
     // Start jMuxer MSE pipeline on a video element with audio from the given URL
     function startMSEPlayback(videoEl, audioSrcUrl) {
         // Clean up any previous instance
@@ -119,6 +146,21 @@
 
         if (typeof JMuxer === 'undefined') {
             postMessage('screensaverBypass', 'JMuxer not loaded — falling back to native');
+            return false;
+        }
+
+        // Check if MSE is available and supports our codecs
+        if (typeof MediaSource === 'undefined') {
+            postMessage('screensaverBypass', 'MediaSource not available — falling back to native');
+            return false;
+        }
+
+        var mseType = 'video/mp4; codecs="avc1.42c00d,mp4a.40.2"';
+        if (!MediaSource.isTypeSupported(mseType)) {
+            postMessage('screensaverBypass', 'MSE type not supported: ' + mseType + ' — falling back to native');
+            // Try video-only as a secondary check
+            var videoOnly = 'video/mp4; codecs="avc1.42c00d"';
+            postMessage('screensaverBypass', 'video-only support: ' + MediaSource.isTypeSupported(videoOnly));
             return false;
         }
 
@@ -135,29 +177,50 @@
         var abortController = new AbortController();
         activeFetchController = abortController;
 
-        var jmuxer = new JMuxer({
-            node: videoEl,
-            mode: 'both',
-            fps: 1,
-            flushingTime: 100,
-            maxDelay: 2000,
-            clearBuffer: true,
-            debug: false,
-            onReady: function () {
-                postMessage('screensaverBypass', 'MSE ready — feeding initial video');
-                // Feed initial H.264 data to set up the video track
-                jmuxer.feed({ video: h264Data, duration: 1000 });
-
-                // Start streaming audio
-                streamAudio(jmuxer, adtsUrl, abortController);
-            },
-            onError: function (err) {
-                postMessage('screensaverBypass', { jmuxerError: err });
-            }
-        });
+        // Wrap jMuxer creation in try/catch for TV-specific failures
+        var jmuxer;
+        try {
+            jmuxer = new JMuxer({
+                node: videoEl,
+                mode: 'both',
+                fps: 1,
+                flushingTime: 100,
+                maxDelay: 2000,
+                clearBuffer: true,
+                debug: false,
+                onReady: function () {
+                    postMessage('screensaverBypass', 'MSE ready — feeding initial video');
+                    try {
+                        // Feed initial H.264 data to set up the video track
+                        jmuxer.feed({ video: h264Data, duration: 1000 });
+                        // Start streaming audio
+                        streamAudio(jmuxer, adtsUrl, abortController);
+                    } catch (feedErr) {
+                        postMessage('screensaverBypass', { initFeedError: feedErr.message });
+                        fallbackToNative(videoEl, audioSrcUrl);
+                    }
+                },
+                onError: function (err) {
+                    postMessage('screensaverBypass', { jmuxerError: err });
+                    fallbackToNative(videoEl, audioSrcUrl);
+                }
+            });
+        } catch (initErr) {
+            postMessage('screensaverBypass', { jmuxerInitError: initErr.message });
+            return false;
+        }
 
         activeJMuxer = jmuxer;
         return true;
+    }
+
+    // Fall back to native audio playback if MSE fails on the TV
+    function fallbackToNative(videoEl, originalUrl) {
+        postMessage('screensaverBypass', 'MSE failed — falling back to native audio playback');
+        stopMSEPlayback();
+        if (nativeSrcDesc) {
+            nativeSrcDesc.set.call(videoEl, originalUrl);
+        }
     }
 
     function stopMSEPlayback() {
@@ -285,7 +348,6 @@
             el._tizenAudioSwap = true;
 
             // Intercept the src setter to redirect through jMuxer MSE pipeline
-            var nativeSrcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
             Object.defineProperty(el, 'src', {
                 get: function () {
                     return nativeSrcDesc.get.call(el);
