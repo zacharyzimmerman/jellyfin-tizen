@@ -3,27 +3,315 @@
 
     console.log('Tizen adapter');
 
-    // Screensaver bypass: Samsung OLED TVs force a screensaver after 2 min of
-    // static pixels. The firmware suppresses it when it detects a <video>
-    // element playing, but NOT for <audio> elements. Tizen also has a single
-    // media element limitation — only one <audio> or <video> can play at a
-    // time, so a PiP approach fails.
+    // Screensaver bypass overview:
     //
-    // Solution: intercept document.createElement so that any <audio> element
-    // jellyfin-web creates is actually a <video> element. The <video> tag has
-    // the same HTMLMediaElement API surface (src, play, pause, volume,
-    // currentTime, events, etc.), so jellyfin-web works unchanged. But the
-    // firmware sees <video> playback and keeps the screen on.
+    // Samsung OLED TVs force a screensaver after 2 min of static pixels. The
+    // firmware only suppresses it when the HARDWARE VIDEO DECODER is active.
+    // Tizen also has a single media element limitation — only one <audio> or
+    // <video> can play at a time.
+    //
+    // Solution: intercept document.createElement so that <audio> elements
+    // become <video> elements, then intercept the src setter to redirect audio
+    // playback through jMuxer's MSE pipeline. jMuxer combines the audio with
+    // pre-baked H.264 black video frames in a single SourceBuffer, engaging
+    // the hardware video decoder and suppressing the screensaver.
+
+    // Pre-baked H.264 elementary stream: 16x16 black, baseline profile, 1fps
+    // Contains SPS + PPS + SEI + 5 IDR frames. We extract SPS+PPS+IDR for
+    // repeating as keyframes alongside audio data.
+    var H264_BASE64 = 'AAAAAWdCwAraewEQAAADABAAAAMAIPEiagAAAAFozgGXIAAAAQYF//9P3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMyAwNDgwY2IwIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTAgcmVmPTEgZGVibG9jaz0wOjA6MCBhbmFseXNlPTA6MCBtZT1kaWEgc3VibWU9MCBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0wIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MCA4eDhkY3Q9MCBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0wIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0wIGtleWludD0yNTAga2V5aW50X21pbj0xIHNjZW5lY3V0PTAgaW50cmFfcmVmcmVzaD0wIHJjPWNyZiBtYnRyZWU9MCBjcmY9NTEuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0wAIAAAAFliIQ6JigAFcAAAAABQZogFKUAAAABQZpAFaUAAAABQZpgFaUAAAABQZqAFaU=';
+
+    function base64ToUint8Array(base64) {
+        var binary = atob(base64);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+    }
+
+    // Parse H.264 annex-b NAL units and build a reusable keyframe (SPS+PPS+IDR)
+    function buildKeyframe(data) {
+        var nals = [];
+        var i = 0;
+        while (i < data.length - 4) {
+            var startCodeLen = 0;
+            if (data[i] === 0 && data[i+1] === 0 && data[i+2] === 0 && data[i+3] === 1) {
+                startCodeLen = 4;
+            } else if (data[i] === 0 && data[i+1] === 0 && data[i+2] === 1) {
+                startCodeLen = 3;
+            }
+            if (startCodeLen > 0) {
+                var end = data.length;
+                for (var j = i + startCodeLen; j < data.length - 3; j++) {
+                    if ((data[j] === 0 && data[j+1] === 0 && data[j+2] === 0 && data[j+3] === 1) ||
+                        (data[j] === 0 && data[j+1] === 0 && data[j+2] === 1)) {
+                        end = j;
+                        break;
+                    }
+                }
+                var nalType = data[i + startCodeLen] & 0x1F;
+                nals.push({ type: nalType, data: data.slice(i, end) });
+                i = end;
+            } else {
+                i++;
+            }
+        }
+        var sps = nals.filter(function (n) { return n.type === 7; })[0];
+        var pps = nals.filter(function (n) { return n.type === 8; })[0];
+        var idr = nals.filter(function (n) { return n.type === 5; })[0];
+        if (!sps || !pps || !idr) return null;
+        var kf = new Uint8Array(sps.data.length + pps.data.length + idr.data.length);
+        kf.set(sps.data, 0);
+        kf.set(pps.data, sps.data.length);
+        kf.set(idr.data, sps.data.length + pps.data.length);
+        return kf;
+    }
+
+    // Extract complete ADTS frames from a buffer, returning any incomplete tail
+    function extractADTSFrames(buffer) {
+        var frames = [];
+        var i = 0;
+        while (i < buffer.length) {
+            if (i + 6 >= buffer.length) break;
+            if (buffer[i] !== 0xFF || (buffer[i + 1] & 0xF0) !== 0xF0) {
+                var found = false;
+                for (var j = i + 1; j < buffer.length - 1; j++) {
+                    if (buffer[j] === 0xFF && (buffer[j + 1] & 0xF0) === 0xF0) {
+                        i = j;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) break;
+            }
+            var frameLen = ((buffer[i + 3] & 0x03) << 11) |
+                           (buffer[i + 4] << 3) |
+                           ((buffer[i + 5] & 0xE0) >>> 5);
+            if (frameLen < 7) { i++; continue; }
+            if (i + frameLen > buffer.length) break;
+            frames.push(buffer.slice(i, i + frameLen));
+            i += frameLen;
+        }
+        var remainder = i < buffer.length ? buffer.slice(i) : new Uint8Array(0);
+        return { frames: frames, remainder: remainder };
+    }
+
+    // Build the H.264 keyframe data once at startup
+    var h264Data = base64ToUint8Array(H264_BASE64);
+    var h264Keyframe = buildKeyframe(h264Data);
+
+    function postMessage() {
+        console.log.apply(console, arguments);
+    }
+
+    // Track active jMuxer instances for cleanup
+    var activeJMuxer = null;
+    var activeFetchController = null;
+
+    // Start jMuxer MSE pipeline on a video element with audio from the given URL
+    function startMSEPlayback(videoEl, audioSrcUrl) {
+        // Clean up any previous instance
+        stopMSEPlayback();
+
+        if (!h264Keyframe) {
+            postMessage('screensaverBypass', 'H.264 keyframe data missing — falling back to native');
+            return false;
+        }
+
+        if (typeof JMuxer === 'undefined') {
+            postMessage('screensaverBypass', 'JMuxer not loaded — falling back to native');
+            return false;
+        }
+
+        // Rewrite the audio URL to request AAC ADTS format for jMuxer
+        var adtsUrl = rewriteToADTS(audioSrcUrl);
+        if (!adtsUrl) {
+            postMessage('screensaverBypass', 'Cannot rewrite URL to ADTS — falling back to native');
+            return false;
+        }
+
+        postMessage('screensaverBypass', 'starting jMuxer MSE pipeline');
+        postMessage('screensaverBypass', { originalUrl: audioSrcUrl, adtsUrl: adtsUrl });
+
+        var abortController = new AbortController();
+        activeFetchController = abortController;
+
+        var jmuxer = new JMuxer({
+            node: videoEl,
+            mode: 'both',
+            fps: 1,
+            flushingTime: 100,
+            maxDelay: 2000,
+            clearBuffer: true,
+            debug: false,
+            onReady: function () {
+                postMessage('screensaverBypass', 'MSE ready — feeding initial video');
+                // Feed initial H.264 data to set up the video track
+                jmuxer.feed({ video: h264Data, duration: 1000 });
+
+                // Start streaming audio
+                streamAudio(jmuxer, adtsUrl, abortController);
+            },
+            onError: function (err) {
+                postMessage('screensaverBypass', { jmuxerError: err });
+            }
+        });
+
+        activeJMuxer = jmuxer;
+        return true;
+    }
+
+    function stopMSEPlayback() {
+        if (activeFetchController) {
+            activeFetchController.abort();
+            activeFetchController = null;
+        }
+        if (activeJMuxer) {
+            try { activeJMuxer.destroy(); } catch (e) { /* ignore */ }
+            activeJMuxer = null;
+        }
+    }
+
+    function streamAudio(jmuxer, adtsUrl, abortController) {
+        fetch(adtsUrl, { signal: abortController.signal })
+            .then(function (response) {
+                if (!response.ok) {
+                    postMessage('screensaverBypass', { audioFetchError: 'HTTP ' + response.status });
+                    return;
+                }
+                postMessage('screensaverBypass', 'audio stream started');
+
+                var reader = response.body.getReader();
+                var remainder = new Uint8Array(0);
+
+                function readChunk() {
+                    reader.read().then(function (result) {
+                        if (result.done) {
+                            postMessage('screensaverBypass', 'audio stream ended');
+                            return;
+                        }
+
+                        // Concatenate with remainder from previous chunk
+                        var combined = new Uint8Array(remainder.length + result.value.length);
+                        combined.set(remainder, 0);
+                        combined.set(result.value, remainder.length);
+
+                        // Extract complete ADTS frames
+                        var parsed = extractADTSFrames(combined);
+                        remainder = parsed.remainder;
+
+                        if (parsed.frames.length > 0) {
+                            // Concatenate frames into one buffer
+                            var totalBytes = 0;
+                            for (var k = 0; k < parsed.frames.length; k++) totalBytes += parsed.frames[k].length;
+                            var audioChunk = new Uint8Array(totalBytes);
+                            var offset = 0;
+                            for (var k = 0; k < parsed.frames.length; k++) {
+                                audioChunk.set(parsed.frames[k], offset);
+                                offset += parsed.frames[k].length;
+                            }
+
+                            // Feed audio + a video keyframe to keep the decoder engaged
+                            try {
+                                jmuxer.feed({
+                                    video: h264Keyframe,
+                                    audio: audioChunk,
+                                    duration: Math.round((parsed.frames.length / 44) * 1000)
+                                });
+                            } catch (e) {
+                                postMessage('screensaverBypass', { feedError: e.message });
+                            }
+                        }
+
+                        readChunk();
+                    }).catch(function (err) {
+                        if (err.name !== 'AbortError') {
+                            postMessage('screensaverBypass', { readError: err.message });
+                        }
+                    });
+                }
+
+                readChunk();
+            })
+            .catch(function (err) {
+                if (err.name !== 'AbortError') {
+                    postMessage('screensaverBypass', { fetchError: err.message });
+                }
+            });
+    }
+
+    // Rewrite a Jellyfin audio URL to request AAC in ADTS format
+    function rewriteToADTS(url) {
+        try {
+            var u = new URL(url);
+
+            // Handle /Audio/{id}/universal endpoint
+            if (/\/Audio\/[^/]+\/universal/i.test(u.pathname)) {
+                // Replace with the stream endpoint requesting ADTS
+                u.pathname = u.pathname.replace('/universal', '/stream');
+                u.searchParams.set('Container', 'adts');
+                u.searchParams.set('AudioCodec', 'aac');
+                // Remove HLS-specific params
+                u.searchParams.delete('TranscodingProtocol');
+                u.searchParams.delete('TranscodingContainer');
+                return u.toString();
+            }
+
+            // Handle /Audio/{id}/stream endpoint
+            if (/\/Audio\/[^/]+\/stream/i.test(u.pathname)) {
+                u.searchParams.set('Container', 'adts');
+                u.searchParams.set('AudioCodec', 'aac');
+                return u.toString();
+            }
+
+            // Handle HLS .m3u8 URLs — can't easily rewrite these
+            if (u.pathname.endsWith('.m3u8')) {
+                return null;
+            }
+
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // Override document.createElement: swap <audio> for <video> and intercept src
     var _origCreateElement = document.createElement.bind(document);
     document.createElement = function (tagName) {
         if (tagName && tagName.toLowerCase() === 'audio') {
-            console.log('Tizen screensaver bypass: replacing <audio> with <video>');
+            postMessage('screensaverBypass', 'replacing <audio> with <video>');
             var el = _origCreateElement('video');
-            // Hide the video element so it doesn't render a black rectangle.
-            // The element must remain in the DOM (not display:none) for the
-            // firmware to detect playback, but we can make it invisible.
             el.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-1;';
             el.setAttribute('playsinline', '');
+            el._tizenAudioSwap = true;
+
+            // Intercept the src setter to redirect through jMuxer MSE pipeline
+            var nativeSrcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+            Object.defineProperty(el, 'src', {
+                get: function () {
+                    return nativeSrcDesc.get.call(el);
+                },
+                set: function (url) {
+                    postMessage('screensaverBypass', { srcSet: url ? url.substring(0, 100) + '...' : url });
+
+                    // If this is a Jellyfin audio URL, try MSE pipeline
+                    if (url && /\/Audio\//i.test(url)) {
+                        var started = startMSEPlayback(el, url);
+                        if (started) {
+                            // Store the original URL for reference
+                            el._originalAudioSrc = url;
+                            return;
+                        }
+                    }
+
+                    // Fallback: native playback (works but won't suppress screensaver)
+                    // Don't destroy MSE pipeline when JMuxer sets its internal blob: URL
+                    if (!url || !url.startsWith('blob:')) stopMSEPlayback();
+                    nativeSrcDesc.set.call(el, url);
+                },
+                configurable: true,
+                enumerable: true
+            });
+
             return el;
         }
         return _origCreateElement.apply(document, arguments);
@@ -101,10 +389,6 @@
         });
     }
 
-    function postMessage() {
-        console.log.apply(console, arguments);
-    }
-
     window.NativeShell = {
         AppHost: {
             init: function () {
@@ -136,20 +420,16 @@
 
             exit: function () {
                 postMessage('AppHost.exit');
+                stopMSEPlayback();
 
-                // Re-enable the screen saver before exiting
                 try {
                     webapis.appcommon.setScreenSaver(
                         webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON
                     );
-                } catch (e) {
-                    // Ignore errors during exit
-                }
+                } catch (e) { /* ignore */ }
                 try {
                     tizen.power.release('SCREEN');
-                } catch (e) {
-                    // Ignore errors during exit
-                }
+                } catch (e) { /* ignore */ }
 
                 tizen.application.getCurrentApplication().exit();
             },
@@ -213,7 +493,6 @@
         updateMediaSession: function (mediaInfo) {
             postMessage('updateMediaSession', { mediaInfo: mediaInfo });
 
-            // Suppress the Samsung screen saver during active playback
             try {
                 webapis.appcommon.setScreenSaver(
                     webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
@@ -232,7 +511,6 @@
         hideMediaSession: function () {
             postMessage('hideMediaSession');
 
-            // Re-enable the Samsung screen saver when playback stops
             try {
                 webapis.appcommon.setScreenSaver(
                     webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
@@ -249,8 +527,7 @@
         }
     };
 
-    // Screen saver suppression — also use Power API as a belt-and-suspenders
-    // approach alongside the createElement override above.
+    // Belt-and-suspenders: also use Power API during media playback
     function suppressScreenSaver() {
         try {
             webapis.appcommon.setScreenSaver(
@@ -288,7 +565,7 @@
         el.addEventListener('emptied', restoreScreenSaver);
     }
 
-    // Watch for dynamically created audio/video elements
+    // Watch for dynamically created media elements
     var observer = new MutationObserver(function (mutations) {
         mutations.forEach(function (m) {
             m.addedNodes.forEach(function (node) {
@@ -311,10 +588,7 @@
         tizen.tvinputdevice.registerKey('MediaRewind');
         tizen.tvinputdevice.registerKey('MediaFastForward');
 
-        // Attach to any media elements already in the DOM
         document.querySelectorAll('audio, video').forEach(attachMediaListeners);
-
-        // Observe for new media elements added later
         observer.observe(document.body, { childList: true, subtree: true });
     });
 
