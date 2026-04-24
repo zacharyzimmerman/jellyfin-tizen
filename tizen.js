@@ -322,6 +322,13 @@
 
             pipVideo.play().then(function () {
                 postMessage('pipVideo', 'playing — screensaver should be suppressed');
+                // If starting the PiP video paused the primary audio, resume it
+                if (primaryAudioEl && primaryAudioEl.paused && !primaryAudioEl.ended) {
+                    postMessage('pipVideo', 'primary audio was paused — resuming');
+                    primaryAudioEl.play().catch(function (e) {
+                        postMessage('pipVideo', { audioResumeError: e.message });
+                    });
+                }
             }).catch(function (err) {
                 postMessage('pipVideo', { error: err.message });
             });
@@ -349,10 +356,17 @@
     // navigator.mediaSession is absent, but modern Tizen browsers have it,
     // so we must listen for playback events independently.
     var screenSaverSuppressed = false;
+    var primaryAudioEl = null; // the audio element that triggered PiP
+    var pipStartTimer = null;
 
-    function suppressScreenSaver() {
+    function suppressScreenSaver(evt) {
         if (screenSaverSuppressed) return;
         postMessage('suppressScreenSaver', 'attempting');
+
+        // Track the audio element so we can resume it if PiP steals playback
+        if (evt && evt.target && evt.target.nodeName === 'AUDIO') {
+            primaryAudioEl = evt.target;
+        }
 
         // Samsung AppCommon API (may not work without Auto Protection Time)
         try {
@@ -370,8 +384,13 @@
             tizen.power.request('SCREEN', 'SCREEN_NORMAL');
         } catch (e) { /* ignore */ }
 
-        // PiP video — real video from server, visible in bottom-right
-        createPipVideo();
+        // Delay PiP creation to let audio pipeline settle — Samsung TVs
+        // may only support one active media session at a time
+        if (pipStartTimer) clearTimeout(pipStartTimer);
+        pipStartTimer = setTimeout(function () {
+            pipStartTimer = null;
+            createPipVideo();
+        }, 3000);
 
         screenSaverSuppressed = true;
     }
@@ -379,6 +398,11 @@
     function restoreScreenSaver() {
         if (!screenSaverSuppressed) return;
         postMessage('restoreScreenSaver', 'attempting');
+
+        if (pipStartTimer) {
+            clearTimeout(pipStartTimer);
+            pipStartTimer = null;
+        }
 
         try {
             webapis.appcommon.setScreenSaver(
@@ -393,6 +417,7 @@
         } catch (e) { /* ignore */ }
 
         removePipVideo();
+        primaryAudioEl = null;
 
         screenSaverSuppressed = false;
     }
