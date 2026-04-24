@@ -267,10 +267,10 @@
                 var item = data.Items[0];
                 // Use transcoding endpoint to guarantee MP4/H264 output
                 // regardless of source container (mkv, avi, mov, etc.)
-                // Low bitrate since this is just a tiny PiP for screensaver prevention
+                // Video-only (no audio) to avoid conflicts with music playback
                 var streamUrl = creds.serverUrl + '/Videos/' + item.Id +
                     '/stream.mp4?mediaSourceId=' + item.Id +
-                    '&VideoCodec=h264&AudioCodec=aac' +
+                    '&VideoCodec=h264&AudioStreamIndex=-1' +
                     '&MaxVideoBitRate=500000&MaxWidth=320&MaxHeight=180' +
                     '&api_key=' + creds.token;
                 postMessage('pipVideo', { itemName: item.Name, itemId: item.Id, streamUrl: streamUrl });
@@ -358,6 +358,7 @@
     var screenSaverSuppressed = false;
     var primaryAudioEl = null; // the audio element that triggered PiP
     var pipStartTimer = null;
+    var pipStarting = false; // guard: ignore audio pause during PiP startup
 
     function suppressScreenSaver(evt) {
         if (screenSaverSuppressed) return;
@@ -384,25 +385,39 @@
             tizen.power.request('SCREEN', 'SCREEN_NORMAL');
         } catch (e) { /* ignore */ }
 
-        // Delay PiP creation to let audio pipeline settle — Samsung TVs
-        // may only support one active media session at a time
+        // Delay PiP creation to let audio pipeline settle
         if (pipStartTimer) clearTimeout(pipStartTimer);
         pipStartTimer = setTimeout(function () {
             pipStartTimer = null;
+            pipStarting = true;
             createPipVideo();
+            // Keep the guard up for 5s to absorb any pause/play bouncing
+            setTimeout(function () { pipStarting = false; }, 5000);
         }, 3000);
 
         screenSaverSuppressed = true;
     }
 
-    function restoreScreenSaver() {
+    function restoreScreenSaver(evt) {
         if (!screenSaverSuppressed) return;
+
+        // During PiP startup, the video may temporarily pause the audio.
+        // Ignore audio pause events during this window to prevent a loop.
+        if (pipStarting && evt && evt.target && evt.target !== pipVideo) {
+            postMessage('restoreScreenSaver', 'ignoring — PiP starting');
+            return;
+        }
+
+        // Also ignore if the PiP video itself fires pause (e.g. during removal)
+        if (evt && evt.target === pipVideo) return;
+
         postMessage('restoreScreenSaver', 'attempting');
 
         if (pipStartTimer) {
             clearTimeout(pipStartTimer);
             pipStartTimer = null;
         }
+        pipStarting = false;
 
         try {
             webapis.appcommon.setScreenSaver(
