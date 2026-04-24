@@ -252,10 +252,10 @@
     }
 
     function fetchRandomVideoUrl(creds) {
-        // Ask Jellyfin for a random video item — use MediaTypes=Video to
-        // ensure we only get actual video content, not audio-only items
+        // Ask Jellyfin for a random video item with actual media files
+        // LocationTypes=FileSystem excludes virtual/placeholder entries
         var url = creds.serverUrl + '/Items?MediaTypes=Video&IncludeItemTypes=Movie,Episode' +
-            '&Recursive=true&SortBy=Random&Limit=1&UserId=' + creds.userId;
+            '&Recursive=true&SortBy=Random&Limit=1&LocationTypes=FileSystem&UserId=' + creds.userId;
         postMessage('pipVideo', { fetchUrl: url });
         return fetch(url, {
             headers: { 'X-Emby-Token': creds.token }
@@ -265,9 +265,14 @@
             postMessage('pipVideo', { itemCount: data.Items ? data.Items.length : 0 });
             if (data.Items && data.Items.length > 0) {
                 var item = data.Items[0];
-                // Build a direct stream URL
-                var streamUrl = creds.serverUrl + '/Videos/' + item.Id + '/stream?Static=true&mediaSourceId=' +
-                    item.Id + '&api_key=' + creds.token;
+                // Use transcoding endpoint to guarantee MP4/H264 output
+                // regardless of source container (mkv, avi, mov, etc.)
+                // Low bitrate since this is just a tiny PiP for screensaver prevention
+                var streamUrl = creds.serverUrl + '/Videos/' + item.Id +
+                    '/stream.mp4?mediaSourceId=' + item.Id +
+                    '&VideoCodec=h264&AudioCodec=aac' +
+                    '&MaxVideoBitRate=500000&MaxWidth=320&MaxHeight=180' +
+                    '&api_key=' + creds.token;
                 postMessage('pipVideo', { itemName: item.Name, itemId: item.Id, streamUrl: streamUrl });
                 return streamUrl;
             }
@@ -304,7 +309,6 @@
             pipVideo.muted = true;
             pipVideo.loop = true;
             pipVideo.setAttribute('playsinline', '');
-            pipVideo.crossOrigin = 'anonymous';
             pipVideo._tizenScreenSaver = true; // skip in MutationObserver
             pipVideo.style.cssText = 'width:100%;height:100%;object-fit:cover;';
             pipVideo.addEventListener('error', function () {
