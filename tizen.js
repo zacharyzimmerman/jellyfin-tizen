@@ -3,6 +3,32 @@
 
     console.log('Tizen adapter');
 
+    // Screensaver bypass: Samsung OLED TVs force a screensaver after 2 min of
+    // static pixels. The firmware suppresses it when it detects a <video>
+    // element playing, but NOT for <audio> elements. Tizen also has a single
+    // media element limitation — only one <audio> or <video> can play at a
+    // time, so a PiP approach fails.
+    //
+    // Solution: intercept document.createElement so that any <audio> element
+    // jellyfin-web creates is actually a <video> element. The <video> tag has
+    // the same HTMLMediaElement API surface (src, play, pause, volume,
+    // currentTime, events, etc.), so jellyfin-web works unchanged. But the
+    // firmware sees <video> playback and keeps the screen on.
+    var _origCreateElement = document.createElement.bind(document);
+    document.createElement = function (tagName) {
+        if (tagName && tagName.toLowerCase() === 'audio') {
+            console.log('Tizen screensaver bypass: replacing <audio> with <video>');
+            var el = _origCreateElement('video');
+            // Hide the video element so it doesn't render a black rectangle.
+            // The element must remain in the DOM (not display:none) for the
+            // firmware to detect playback, but we can make it invisible.
+            el.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-1;';
+            el.setAttribute('playsinline', '');
+            return el;
+        }
+        return _origCreateElement.apply(document, arguments);
+    };
+
     // Similar to jellyfin-web
     function generateDeviceId() {
         return btoa([navigator.userAgent, new Date().getTime()].join('|')).replace(/=/g, '1');
@@ -10,7 +36,6 @@
 
     function getDeviceId() {
         // Use variable '_deviceId2' to mimic jellyfin-web
-
         var deviceId = localStorage.getItem('_deviceId2');
 
         if (!deviceId) {
@@ -224,201 +249,23 @@
         }
     };
 
-    // Screensaver bypass: play a real video from the Jellyfin server in a
-    // visible mini-player during audio playback. Samsung OLED firmware only
-    // suppresses the 2-min screensaver when it detects real video playback
-    // through the standard media pipeline — data URIs, hidden elements, and
-    // API calls all failed. A visible muted video is the nuclear option that
-    // we know works because Jellyfin's own video playback suppresses it.
-    var pipVideo = null;
-    var pipContainer = null;
-
-    function getJellyfinCredentials() {
-        // jellyfin-web stores auth in the 'jellyfin_credentials' key
-        try {
-            var creds = JSON.parse(localStorage.getItem('jellyfin_credentials'));
-            if (creds && creds.Servers && creds.Servers.length > 0) {
-                var server = creds.Servers[0];
-                return {
-                    serverUrl: server.ManualAddress || server.LocalAddress || server.RemoteAddress,
-                    token: server.AccessToken,
-                    userId: server.UserId
-                };
-            }
-        } catch (e) {
-            postMessage('pipVideo', { error: 'Failed to read credentials: ' + e.message });
-        }
-        return null;
-    }
-
-    function fetchRandomVideoUrl(creds) {
-        // Ask Jellyfin for a random video item with actual media files
-        // LocationTypes=FileSystem excludes virtual/placeholder entries
-        var url = creds.serverUrl + '/Items?MediaTypes=Video&IncludeItemTypes=Movie,Episode' +
-            '&Recursive=true&SortBy=Random&Limit=1&LocationTypes=FileSystem&UserId=' + creds.userId;
-        postMessage('pipVideo', { fetchUrl: url });
-        return fetch(url, {
-            headers: { 'X-Emby-Token': creds.token }
-        })
-        .then(function (res) { return res.json(); })
-        .then(function (data) {
-            postMessage('pipVideo', { itemCount: data.Items ? data.Items.length : 0 });
-            if (data.Items && data.Items.length > 0) {
-                var item = data.Items[0];
-                // Use transcoding endpoint to guarantee MP4/H264 output
-                // regardless of source container (mkv, avi, mov, etc.)
-                // Video-only (no audio) to avoid conflicts with music playback
-                var streamUrl = creds.serverUrl + '/Videos/' + item.Id +
-                    '/stream.mp4?mediaSourceId=' + item.Id +
-                    '&VideoCodec=h264&AudioStreamIndex=-1' +
-                    '&MaxVideoBitRate=500000&MaxWidth=320&MaxHeight=180' +
-                    '&api_key=' + creds.token;
-                postMessage('pipVideo', { itemName: item.Name, itemId: item.Id, streamUrl: streamUrl });
-                return streamUrl;
-            }
-            return null;
-        });
-    }
-
-    function createPipVideo() {
-        if (pipVideo) return;
-
-        var creds = getJellyfinCredentials();
-        if (!creds) {
-            postMessage('pipVideo', 'no credentials found — cannot create PiP');
-            return;
-        }
-
-        fetchRandomVideoUrl(creds).then(function (streamUrl) {
-            if (!streamUrl) {
-                postMessage('pipVideo', 'no video items found on server');
-                return;
-            }
-
-            // Container with rounded corners and subtle border
-            pipContainer = document.createElement('div');
-            pipContainer.id = 'tizen-pip-screensaver';
-            pipContainer.style.cssText =
-                'position:fixed;bottom:20px;right:20px;width:192px;height:108px;' +
-                'border-radius:8px;overflow:hidden;z-index:999998;' +
-                'box-shadow:0 2px 8px rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.1);';
-            document.body.appendChild(pipContainer);
-
-            pipVideo = document.createElement('video');
-            pipVideo.src = streamUrl;
-            pipVideo.muted = true;
-            pipVideo.loop = true;
-            pipVideo.setAttribute('playsinline', '');
-            pipVideo._tizenScreenSaver = true; // skip in MutationObserver
-            pipVideo.style.cssText = 'width:100%;height:100%;object-fit:cover;';
-            pipVideo.addEventListener('error', function () {
-                var e = pipVideo.error;
-                postMessage('pipVideo', { videoError: e ? e.code + ': ' + e.message : 'unknown' });
-            });
-            pipVideo.addEventListener('loadeddata', function () {
-                postMessage('pipVideo', 'loadeddata — video frames ready');
-            });
-            pipContainer.appendChild(pipVideo);
-
-            pipVideo.play().then(function () {
-                postMessage('pipVideo', 'playing — screensaver should be suppressed');
-                // If starting the PiP video paused the primary audio, resume it
-                if (primaryAudioEl && primaryAudioEl.paused && !primaryAudioEl.ended) {
-                    postMessage('pipVideo', 'primary audio was paused — resuming');
-                    primaryAudioEl.play().catch(function (e) {
-                        postMessage('pipVideo', { audioResumeError: e.message });
-                    });
-                }
-            }).catch(function (err) {
-                postMessage('pipVideo', { error: err.message });
-            });
-        }).catch(function (err) {
-            postMessage('pipVideo', { error: 'fetch failed: ' + err.message });
-        });
-    }
-
-    function removePipVideo() {
-        if (pipVideo) {
-            pipVideo.pause();
-            pipVideo.removeAttribute('src');
-            pipVideo.load();
-            pipVideo = null;
-        }
-        if (pipContainer) {
-            pipContainer.remove();
-            pipContainer = null;
-        }
-        postMessage('pipVideo', 'removed');
-    }
-
-    // Screen saver suppression — directly observe media elements
-    // NativeShell.updateMediaSession/hideMediaSession are only called when
-    // navigator.mediaSession is absent, but modern Tizen browsers have it,
-    // so we must listen for playback events independently.
-    var screenSaverSuppressed = false;
-    var primaryAudioEl = null; // the audio element that triggered PiP
-    var pipStartTimer = null;
-    var pipStarting = false; // guard: ignore audio pause during PiP startup
-
-    function suppressScreenSaver(evt) {
-        if (screenSaverSuppressed) return;
-        postMessage('suppressScreenSaver', 'attempting');
-
-        // Track the audio element so we can resume it if PiP steals playback
-        if (evt && evt.target && evt.target.nodeName === 'AUDIO') {
-            primaryAudioEl = evt.target;
-        }
-
-        // Samsung AppCommon API (may not work without Auto Protection Time)
+    // Screen saver suppression — also use Power API as a belt-and-suspenders
+    // approach alongside the createElement override above.
+    function suppressScreenSaver() {
         try {
             webapis.appcommon.setScreenSaver(
                 webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
                 function () { postMessage('setScreenSaver', { state: 'OFF' }); },
                 function (err) { postMessage('setScreenSaver', { state: 'OFF', error: JSON.stringify(err) }); }
             );
-        } catch (e) {
-            postMessage('setScreenSaver', { error: e.message });
-        }
+        } catch (e) { /* ignore */ }
 
-        // Tizen Power API
         try {
             tizen.power.request('SCREEN', 'SCREEN_NORMAL');
         } catch (e) { /* ignore */ }
-
-        // Delay PiP creation to let audio pipeline settle
-        if (pipStartTimer) clearTimeout(pipStartTimer);
-        pipStartTimer = setTimeout(function () {
-            pipStartTimer = null;
-            pipStarting = true;
-            createPipVideo();
-            // Keep the guard up for 5s to absorb any pause/play bouncing
-            setTimeout(function () { pipStarting = false; }, 5000);
-        }, 3000);
-
-        screenSaverSuppressed = true;
     }
 
-    function restoreScreenSaver(evt) {
-        if (!screenSaverSuppressed) return;
-
-        // During PiP startup, the video may temporarily pause the audio.
-        // Ignore audio pause events during this window to prevent a loop.
-        if (pipStarting && evt && evt.target && evt.target !== pipVideo) {
-            postMessage('restoreScreenSaver', 'ignoring — PiP starting');
-            return;
-        }
-
-        // Also ignore if the PiP video itself fires pause (e.g. during removal)
-        if (evt && evt.target === pipVideo) return;
-
-        postMessage('restoreScreenSaver', 'attempting');
-
-        if (pipStartTimer) {
-            clearTimeout(pipStartTimer);
-            pipStartTimer = null;
-        }
-        pipStarting = false;
-
+    function restoreScreenSaver() {
         try {
             webapis.appcommon.setScreenSaver(
                 webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
@@ -430,16 +277,11 @@
         try {
             tizen.power.release('SCREEN');
         } catch (e) { /* ignore */ }
-
-        removePipVideo();
-        primaryAudioEl = null;
-
-        screenSaverSuppressed = false;
     }
 
     function attachMediaListeners(el) {
-        if (el._tizenScreenSaver) return;
-        el._tizenScreenSaver = true;
+        if (el._tizenListenersAttached) return;
+        el._tizenListenersAttached = true;
         el.addEventListener('playing', suppressScreenSaver);
         el.addEventListener('pause', restoreScreenSaver);
         el.addEventListener('ended', restoreScreenSaver);
@@ -453,7 +295,6 @@
                 if (node.nodeName === 'AUDIO' || node.nodeName === 'VIDEO') {
                     attachMediaListeners(node);
                 }
-                // Also check children (e.g. a container with a media element inside)
                 if (node.querySelectorAll) {
                     node.querySelectorAll('audio, video').forEach(attachMediaListeners);
                 }
@@ -479,7 +320,6 @@
 
     function updateKeys() {
         if (location.hash.indexOf('/queue') !== -1 || location.hash.indexOf('/video') !== -1) {
-            // Disable on-screen playback control, if available on the page
             tizen.tvinputdevice.registerKey('MediaPlayPause');
         } else {
             tizen.tvinputdevice.unregisterKey('MediaPlayPause');
