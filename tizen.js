@@ -7,28 +7,22 @@
     // Reduced to critical messages only, with larger font for readability on photos
     var _debugOverlay = null;
     var _debugLines = [];
-    var _MAX_DEBUG_LINES = 15;
+    var _MAX_DEBUG_LINES = 25;
     // Only show messages matching these keywords (keep log concise on TV)
-    var _DEBUG_FILTER = ['TEARDOWN', 'BLOCKED', 'srcSet', 'MSE started', 'MSE failed', 'proxy fully',
-        'proxied play', 'auth', 'error', 'fallback', 'jmuxerError', 'feedError',
-        'audio URL detected', 'audio stream', 'MSE ready', '  at '];
+    // Show ALL screensaverBypass messages (no filtering) to see full sequence
+    var _DEBUG_FILTER = null; // null = show everything
     function debugLog(msg) {
         var text = typeof msg === 'object' ? JSON.stringify(msg) : String(msg);
         var ts = new Date().toLocaleTimeString('en-US', { hour12: false }).substring(0, 8);
         var line = ts + ' ' + text;
-        // Always log to console, but only show filtered messages on overlay
-        var dominated = false;
-        for (var f = 0; f < _DEBUG_FILTER.length; f++) {
-            if (text.indexOf(_DEBUG_FILTER[f]) !== -1) { dominated = true; break; }
-        }
-        if (!dominated) return;
+        // Show all messages (debug mode — no filter)
         _debugLines.push(line);
         if (_debugLines.length > _MAX_DEBUG_LINES) _debugLines.shift();
         if (!_debugOverlay) {
             _debugOverlay = document.createElement('div');
             _debugOverlay.id = 'tizen-debug';
-            _debugOverlay.style.cssText = 'position:fixed;top:0;left:0;width:33%;max-height:80vh;overflow-y:auto;' +
-                'background:rgba(0,0,0,0.92);color:#0f0;font:14px/1.4 monospace;padding:8px;z-index:999999;' +
+            _debugOverlay.style.cssText = 'position:fixed;top:0;left:0;width:38%;max-height:90vh;overflow-y:auto;' +
+                'background:rgba(0,0,0,0.92);color:#0f0;font:12px/1.3 monospace;padding:6px;z-index:999999;' +
                 'pointer-events:none;white-space:pre-wrap;word-break:break-all;';
             (document.body || document.documentElement).appendChild(_debugOverlay);
         }
@@ -408,20 +402,22 @@
     var _origCreateElement = document.createElement.bind(document);
     // Track the currently proxied pair for cleanup
     var _proxyVideoEl = null;
+    var _audioCount = 0;
 
     document.createElement = function (tagName) {
         if (tagName && tagName.toLowerCase() === 'audio') {
             var el = _origCreateElement('audio');
             el._tizenHooked = true;
+            el._tizenId = ++_audioCount;
 
-            postMessage('screensaverBypass', 'hooking <audio> element for proxy pattern');
+            postMessage('screensaverBypass', 'AUDIO #' + el._tizenId + ' created');
 
             Object.defineProperty(el, 'src', {
                 get: function () {
                     return el._tizenProxiedSrc || nativeSrcDesc.get.call(el);
                 },
                 set: function (url) {
-                    postMessage('screensaverBypass', { srcSet: url ? url.substring(0, 120) : url });
+                    postMessage('screensaverBypass', '#' + el._tizenId + ' srcSet=' + (url ? url.substring(0, 80) : String(url)));
 
                     // BLOCK src="" or src=null while proxy is active — jellyfin-web
                     // does this as "cleanup" before/after playback, but it kills our
