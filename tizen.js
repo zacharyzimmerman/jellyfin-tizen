@@ -4,18 +4,13 @@
     console.log('Tizen adapter');
 
     // On-screen debug overlay — shows log messages directly on the TV
-    // Reduced to critical messages only, with larger font for readability on photos
     var _debugOverlay = null;
     var _debugLines = [];
     var _MAX_DEBUG_LINES = 25;
-    // Only show messages matching these keywords (keep log concise on TV)
-    // Show ALL screensaverBypass messages (no filtering) to see full sequence
-    var _DEBUG_FILTER = null; // null = show everything
     function debugLog(msg) {
         var text = typeof msg === 'object' ? JSON.stringify(msg) : String(msg);
         var ts = new Date().toLocaleTimeString('en-US', { hour12: false }).substring(0, 8);
         var line = ts + ' ' + text;
-        // Show all messages (debug mode — no filter)
         _debugLines.push(line);
         if (_debugLines.length > _MAX_DEBUG_LINES) _debugLines.shift();
         if (!_debugOverlay) {
@@ -29,54 +24,45 @@
         _debugOverlay.textContent = _debugLines.join('\n');
     }
 
-    // Screensaver bypass overview:
+    // Screensaver bypass: side-channel video-only MSE
     //
     // Samsung OLED TVs force a screensaver after 2 min of static pixels. The
     // firmware only suppresses it when the HARDWARE VIDEO DECODER is active.
-    // Tizen also has a single media element limitation — only one <audio> or
-    // <video> can play at a time.
     //
-    // Solution (proxy pattern): intercept document.createElement('audio') and
-    // hook the src setter. When jellyfin-web sets an audio URL, we create a
-    // HIDDEN <video> element with jMuxer's MSE pipeline (AAC audio + H.264
-    // black video frames). The <audio> stays in the DOM as jellyfin-web's API
-    // surface — play(), pause(), volume, currentTime, and all events are
-    // proxied between the two elements. This way:
+    // Previous approach (proxy pattern) intercepted createElement('audio') and
+    // tried to proxy all playback through a hidden <video> with MSE. This failed
+    // because jellyfin-web's htmlAudioPlayer.destroy() fires immediately after
+    // play(), removing all event listeners and abandoning the player. No amount
+    // of interception can prevent jellyfin-web from destroying the player.
     //
-    //   1. canPlayType() works correctly (real <audio> for device profile)
-    //   2. jellyfin-web's _mediaElement reference stays valid
-    //   3. All event listeners (timeupdate, ended, etc.) fire correctly
-    //   4. The hidden <video> engages the hardware decoder via MSE
-    //   5. If MSE fails, the proxy tears down and <audio> plays natively
+    // New approach: DON'T INTERCEPT ANYTHING. Let jellyfin-web's native audio
+    // playback work 100% unmodified. Separately, when audio starts playing,
+    // create a hidden <video> element and feed it H.264-only keyframes via
+    // jMuxer's MSE pipeline (video-only mode, no audio track). This keeps the
+    // hardware video decoder active without competing for the audio output.
+    //
+    // The single-element limitation may only apply when both elements produce
+    // audio. A muted video-only MSE stream may coexist with native audio.
 
     // Pre-baked H.264 elementary stream: 128x128 black, constrained baseline, level 1.3, 1fps
-    // Contains SPS + PPS + SEI + 5 IDR frames. We extract SPS+PPS+IDR for
-    // repeating as keyframes alongside audio data.
-    // Codec string: avc1.42c00d (Constrained Baseline, Level 1.3)
     var H264_BASE64 = 'AAAAAWdCwA3cIEbARAAAAwAEAAADAAg8UK4AAAABaM4BlEyAAAABBgX//1zcRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIzIDA0ODBjYjAgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MSBkZWJsb2NrPTE6LTM6LTMgYW5hbHlzZT0weDE6MHgxMTEgbWU9aGV4IHN1Ym1lPTcgcHN5PTEgcHN5X3JkPTIuMDA6MC43MCBtaXhlZF9yZWY9MCBtZV9yYW5nZT0xNiBjaHJvbWFfbWU9MSB0cmVsbGlzPTEgOHg4ZGN0PTAgY3FtPTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0xIGNocm9tYV9xcF9vZmZzZXQ9LTQgdGhyZWFkcz00IGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MCB3ZWlnaHRwPTAga2V5aW50PTEga2V5aW50X21pbj0xIHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByYz1jcmYgbWJ0cmVlPTAgY3JmPTUxLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjIwAIAAAAFliIQFc5yYoAAhIybk5OTk5OTrdddddddddddddddddddddddddddddddddddddddddddddddddddddddeAAAAAWdCwA3cIEbARAAAAwAEAAADAAg8UK4AAAABaM4BlEyAAAABZYiCAIM5yYoAAk1ycnJycnJyddddddddddddddddddddddddddddddddddddddddddddddddddddddddeAAAAAFnQsAN3CBGwEQAAAMABAAAAwAIPFCuAAAAAWjOAZRMgAAAAWWIhAIM5yYoAAk1ycnJycnJyddddddddddddddddddddddddddddddddddddddddddddddddddddddddeAAAAABZ0LADdwgRsBEAAADAAQAAAMACDxQrgAAAAFozgGUTIAAAAFliIIAgznJigACTXJycnJycnJ111111111111111111111111111111111111111111111111111111114AAAAAWdCwA3cIEbARAAAAwAEAAADAAg8UK4AAAABaM4BlEyAAAABZYiEAgznJigACTXJycnJycnJ111111111111111111111111111111111111111111111111111111114A==';
 
-    // Run MSE codec diagnostics at startup (results visible in TV debug console)
+    // Run MSE codec diagnostics at startup
     (function diagnoseMSE() {
         var codecs = [
             'video/mp4; codecs="avc1.42c00d"',
             'video/mp4; codecs="avc1.42c00d,mp4a.40.2"',
             'video/mp4; codecs="avc1.42E01E"',
-            'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
-            'video/mp4; codecs="avc1.4D401E"',
-            'video/mp4; codecs="avc1.640028"',
             'audio/mp4; codecs="mp4a.40.2"',
-            'video/mp4; codecs="mp4a.40.2"',
             'video/mp4',
             'audio/mp4'
         ];
         var hasMS = typeof MediaSource !== 'undefined';
         debugLog('[DIAG] MediaSource: ' + hasMS);
-        console.log('[TIZEN-DIAG] MediaSource available:', hasMS);
         if (hasMS) {
             codecs.forEach(function (c) {
                 var supported = MediaSource.isTypeSupported(c);
                 debugLog('[DIAG] ' + c + ': ' + supported);
-                console.log('[TIZEN-DIAG] isTypeSupported(' + c + '):', supported);
             });
         }
     })();
@@ -126,35 +112,6 @@
         return kf;
     }
 
-    // Extract complete ADTS frames from a buffer, returning any incomplete tail
-    function extractADTSFrames(buffer) {
-        var frames = [];
-        var i = 0;
-        while (i < buffer.length) {
-            if (i + 6 >= buffer.length) break;
-            if (buffer[i] !== 0xFF || (buffer[i + 1] & 0xF0) !== 0xF0) {
-                var found = false;
-                for (var j = i + 1; j < buffer.length - 1; j++) {
-                    if (buffer[j] === 0xFF && (buffer[j + 1] & 0xF0) === 0xF0) {
-                        i = j;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) break;
-            }
-            var frameLen = ((buffer[i + 3] & 0x03) << 11) |
-                           (buffer[i + 4] << 3) |
-                           ((buffer[i + 5] & 0xE0) >>> 5);
-            if (frameLen < 7) { i++; continue; }
-            if (i + frameLen > buffer.length) break;
-            frames.push(buffer.slice(i, i + frameLen));
-            i += frameLen;
-        }
-        var remainder = i < buffer.length ? buffer.slice(i) : new Uint8Array(0);
-        return { frames: frames, remainder: remainder };
-    }
-
     // Build the H.264 keyframe data once at startup
     var h264Data = base64ToUint8Array(H264_BASE64);
     var h264Keyframe = buildKeyframe(h264Data);
@@ -168,646 +125,188 @@
         debugLog(parts.join(' '));
     }
 
-    // Track active jMuxer instances for cleanup
-    var activeJMuxer = null;
-    var activeFetchController = null;
+    // ============================================================
+    // Side-channel video-only MSE: keeps hardware decoder active
+    // without interfering with jellyfin-web's audio playback
+    // ============================================================
 
-    // Track the native src descriptor once for reuse in fallback
-    var nativeSrcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+    var _sideChannelVideo = null;
+    var _sideChannelJMuxer = null;
+    var _sideChannelInterval = null;
+    var _sideChannelActive = false;
 
-    // Start jMuxer MSE pipeline on a video element with audio from the given URL
-    function startMSEPlayback(videoEl, audioSrcUrl) {
-        // Clean up any previous instance
-        stopMSEPlayback();
+    function startSideChannel() {
+        if (_sideChannelActive) {
+            debugLog('[SIDE] already active');
+            return;
+        }
 
         if (!h264Keyframe) {
-            postMessage('screensaverBypass', 'H.264 keyframe data missing — falling back to native');
-            return false;
+            debugLog('[SIDE] no H.264 keyframe data');
+            return;
         }
 
         if (typeof JMuxer === 'undefined') {
-            postMessage('screensaverBypass', 'JMuxer not loaded — falling back to native');
-            return false;
+            debugLog('[SIDE] JMuxer not loaded');
+            return;
         }
 
-        // Check if MSE is available and supports our codecs
         if (typeof MediaSource === 'undefined') {
-            postMessage('screensaverBypass', 'MediaSource not available — falling back to native');
-            return false;
+            debugLog('[SIDE] MediaSource not available');
+            return;
         }
 
-        var mseType = 'video/mp4; codecs="avc1.42c00d,mp4a.40.2"';
-        if (!MediaSource.isTypeSupported(mseType)) {
-            postMessage('screensaverBypass', 'MSE type not supported: ' + mseType + ' — falling back to native');
-            // Try video-only as a secondary check
-            var videoOnly = 'video/mp4; codecs="avc1.42c00d"';
-            postMessage('screensaverBypass', 'video-only support: ' + MediaSource.isTypeSupported(videoOnly));
-            return false;
+        var videoOnlyType = 'video/mp4; codecs="avc1.42c00d"';
+        if (!MediaSource.isTypeSupported(videoOnlyType)) {
+            debugLog('[SIDE] video-only MSE not supported');
+            return;
         }
 
-        // Rewrite the audio URL to request AAC ADTS format for jMuxer
-        var adtsUrl = rewriteToADTS(audioSrcUrl);
-        if (!adtsUrl) {
-            postMessage('screensaverBypass', 'Cannot rewrite URL to ADTS — falling back to native');
-            return false;
-        }
+        debugLog('[SIDE] starting video-only MSE');
+        _sideChannelActive = true;
 
-        postMessage('screensaverBypass', 'starting jMuxer MSE pipeline');
-        postMessage('screensaverBypass', { originalUrl: audioSrcUrl, adtsUrl: adtsUrl });
+        // Create hidden video element
+        var videoEl = document.createElement('video');
+        videoEl.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-1;';
+        videoEl.setAttribute('playsinline', '');
+        videoEl.muted = true; // critical: no audio output from this element
+        videoEl.volume = 0;
+        document.body.appendChild(videoEl);
+        _sideChannelVideo = videoEl;
 
-        var abortController = new AbortController();
-        activeFetchController = abortController;
-
-        // Wrap jMuxer creation in try/catch for TV-specific failures
-        var jmuxer;
         try {
-            jmuxer = new JMuxer({
+            var jmuxer = new JMuxer({
                 node: videoEl,
-                mode: 'both',
+                mode: 'video',  // VIDEO ONLY — no audio track
                 fps: 1,
-                flushingTime: 100,
-                maxDelay: 2000,
-                clearBuffer: true,
+                flushingTime: 1000,
+                maxDelay: 5000,
+                clearBuffer: false,
                 debug: false,
                 onReady: function () {
-                    postMessage('screensaverBypass', 'MSE ready — feeding initial video');
+                    debugLog('[SIDE] MSE ready — feeding initial keyframes');
                     try {
                         // Feed initial H.264 data to set up the video track
                         jmuxer.feed({ video: h264Data, duration: 1000 });
-                        // Start streaming audio
-                        streamAudio(jmuxer, adtsUrl, abortController);
-                    } catch (feedErr) {
-                        postMessage('screensaverBypass', { initFeedError: feedErr.message });
-                        fallbackToNative(videoEl, audioSrcUrl);
+
+                        // Start periodic keyframe feeding (1 fps)
+                        _sideChannelInterval = setInterval(function () {
+                            if (_sideChannelJMuxer && _sideChannelActive) {
+                                try {
+                                    _sideChannelJMuxer.feed({ video: h264Keyframe, duration: 1000 });
+                                } catch (e) {
+                                    debugLog('[SIDE] feed error: ' + e.message);
+                                }
+                            }
+                        }, 1000);
+
+                        // Try to play the video
+                        videoEl.play().then(function () {
+                            debugLog('[SIDE] video playing');
+                        }).catch(function (e) {
+                            debugLog('[SIDE] play error: ' + e.message);
+                        });
+                    } catch (e) {
+                        debugLog('[SIDE] init feed error: ' + e.message);
+                        stopSideChannel();
                     }
                 },
                 onError: function (err) {
-                    postMessage('screensaverBypass', { jmuxerError: err });
-                    fallbackToNative(videoEl, audioSrcUrl);
+                    debugLog('[SIDE] jMuxer error: ' + JSON.stringify(err));
+                    stopSideChannel();
                 }
             });
-        } catch (initErr) {
-            postMessage('screensaverBypass', { jmuxerInitError: initErr.message });
-            return false;
-        }
-
-        activeJMuxer = jmuxer;
-        return true;
-    }
-
-    // Fall back to native audio playback if MSE fails on the TV.
-    // With the proxy pattern, we just tear down the proxy and set the original
-    // URL natively on the <audio> element that jellyfin-web still holds.
-    function fallbackToNative(videoEl, originalUrl) {
-        postMessage('screensaverBypass', 'MSE runtime error — falling back to native audio playback');
-
-        // Find the <audio> element that owns this proxy
-        var audioEl = videoEl._proxyOwner;
-        if (audioEl) {
-            tearDownProxy(audioEl);
-            nativeSrcDesc.set.call(audioEl, originalUrl);
-            postMessage('screensaverBypass', 'restored native playback on <audio>');
-        } else {
-            // Shouldn't happen, but try to play on the video element directly
-            stopMSEPlayback();
-            nativeSrcDesc.set.call(videoEl, originalUrl);
-        }
-    }
-
-    function stopMSEPlayback() {
-        if (activeFetchController) {
-            activeFetchController.abort();
-            activeFetchController = null;
-        }
-        if (activeJMuxer) {
-            try { activeJMuxer.destroy(); } catch (e) { /* ignore */ }
-            activeJMuxer = null;
-        }
-    }
-
-    function streamAudio(jmuxer, adtsUrl, abortController) {
-        fetch(adtsUrl, { signal: abortController.signal })
-            .then(function (response) {
-                if (!response.ok) {
-                    postMessage('screensaverBypass', { audioFetchError: 'HTTP ' + response.status });
-                    return;
-                }
-                postMessage('screensaverBypass', 'audio stream started');
-
-                var reader = response.body.getReader();
-                var remainder = new Uint8Array(0);
-
-                function readChunk() {
-                    reader.read().then(function (result) {
-                        if (result.done) {
-                            postMessage('screensaverBypass', 'audio stream ended');
-                            return;
-                        }
-
-                        // Concatenate with remainder from previous chunk
-                        var combined = new Uint8Array(remainder.length + result.value.length);
-                        combined.set(remainder, 0);
-                        combined.set(result.value, remainder.length);
-
-                        // Extract complete ADTS frames
-                        var parsed = extractADTSFrames(combined);
-                        remainder = parsed.remainder;
-
-                        if (parsed.frames.length > 0) {
-                            // Concatenate frames into one buffer
-                            var totalBytes = 0;
-                            for (var k = 0; k < parsed.frames.length; k++) totalBytes += parsed.frames[k].length;
-                            var audioChunk = new Uint8Array(totalBytes);
-                            var offset = 0;
-                            for (var k = 0; k < parsed.frames.length; k++) {
-                                audioChunk.set(parsed.frames[k], offset);
-                                offset += parsed.frames[k].length;
-                            }
-
-                            // Feed audio + a video keyframe to keep the decoder engaged
-                            try {
-                                jmuxer.feed({
-                                    video: h264Keyframe,
-                                    audio: audioChunk,
-                                    duration: Math.round((parsed.frames.length / 44) * 1000)
-                                });
-                            } catch (e) {
-                                postMessage('screensaverBypass', { feedError: e.message });
-                            }
-                        }
-
-                        readChunk();
-                    }).catch(function (err) {
-                        if (err.name !== 'AbortError') {
-                            postMessage('screensaverBypass', { readError: err.message });
-                        }
-                    });
-                }
-
-                readChunk();
-            })
-            .catch(function (err) {
-                if (err.name !== 'AbortError') {
-                    postMessage('screensaverBypass', { fetchError: err.message });
-                }
-            });
-    }
-
-    // Rewrite a Jellyfin audio URL to request AAC in ADTS format
-    function rewriteToADTS(url) {
-        try {
-            var u = new URL(url);
-
-            // Handle /Audio/{id}/universal endpoint
-            if (/\/Audio\/[^/]+\/universal/i.test(u.pathname)) {
-                // Replace with the stream endpoint requesting ADTS
-                u.pathname = u.pathname.replace('/universal', '/stream');
-                u.searchParams.set('Container', 'adts');
-                u.searchParams.set('AudioCodec', 'aac');
-                // Remove HLS-specific params
-                u.searchParams.delete('TranscodingProtocol');
-                u.searchParams.delete('TranscodingContainer');
-                return u.toString();
-            }
-
-            // Handle /Audio/{id}/stream endpoint
-            if (/\/Audio\/[^/]+\/stream/i.test(u.pathname)) {
-                u.searchParams.set('Container', 'adts');
-                u.searchParams.set('AudioCodec', 'aac');
-                return u.toString();
-            }
-
-            // Handle HLS .m3u8 URLs — can't easily rewrite these
-            if (u.pathname.endsWith('.m3u8')) {
-                return null;
-            }
-
-            return null;
+            _sideChannelJMuxer = jmuxer;
         } catch (e) {
-            return null;
+            debugLog('[SIDE] jMuxer init error: ' + e.message);
+            _sideChannelActive = false;
+            if (_sideChannelVideo && _sideChannelVideo.parentNode) {
+                _sideChannelVideo.parentNode.removeChild(_sideChannelVideo);
+            }
+            _sideChannelVideo = null;
         }
     }
 
-    // Override document.createElement: hook <audio> to proxy playback through
-    // a hidden <video> with MSE, keeping the <audio> as jellyfin-web's API surface.
-    //
-    // Architecture:
-    //   jellyfin-web  ←→  <audio> (proxy)  ←→  <video> (hidden, MSE pipeline)
-    //
-    // The <audio> stays in the DOM and keeps all jellyfin-web's event listeners.
-    // play(), pause(), volume, currentTime are proxied to the <video>.
-    // Events from <video> are re-dispatched on <audio> so jellyfin-web sees them.
-    // If MSE fails, the proxy is torn down and <audio> plays natively.
+    function stopSideChannel() {
+        if (!_sideChannelActive) return;
 
-    var _origCreateElement = document.createElement.bind(document);
-    // Track the currently proxied pair for cleanup
-    var _proxyVideoEl = null;
-    var _audioCount = 0;
+        debugLog('[SIDE] stopping video-only MSE');
+        _sideChannelActive = false;
 
-    document.createElement = function (tagName) {
-        if (tagName && tagName.toLowerCase() === 'audio') {
-            var el = _origCreateElement('audio');
-            el._tizenHooked = true;
-            el._tizenId = ++_audioCount;
-
-            postMessage('screensaverBypass', 'AUDIO #' + el._tizenId + ' created');
-
-            Object.defineProperty(el, 'src', {
-                get: function () {
-                    return el._tizenProxiedSrc || nativeSrcDesc.get.call(el);
-                },
-                set: function (url) {
-                    postMessage('screensaverBypass', '#' + el._tizenId + ' srcSet=' + (url ? url.substring(0, 80) : String(url)));
-
-                    // BLOCK src="" or src=null while proxy is active — jellyfin-web
-                    // does this as "cleanup" before/after playback, but it kills our
-                    // MSE proxy. Just swallow it and keep the proxy running.
-                    if (el._tizenProxy && (!url || url === '')) {
-                        try {
-                            throw new Error('src-clear-trace');
-                        } catch (traceErr) {
-                            var frames = traceErr.stack.split('\n').slice(1, 6);
-                            postMessage('screensaverBypass', 'BLOCKED src=""');
-                            frames.forEach(function (f) {
-                                postMessage('screensaverBypass', '  ' + f.trim());
-                            });
-                        }
-                        return; // swallow — don't tear down
-                    }
-
-                    // Log who is setting src when proxy is active (debug)
-                    if (el._tizenProxy && !/\/Audio\//i.test(url)) {
-                        try {
-                            throw new Error('src-change-trace');
-                        } catch (traceErr) {
-                            var frames2 = traceErr.stack.split('\n').slice(1, 6);
-                            postMessage('screensaverBypass', 'TEARDOWN BY non-audio src:');
-                            frames2.forEach(function (f) {
-                                postMessage('screensaverBypass', '  ' + f.trim());
-                            });
-                        }
-                    }
-
-                    // Tear down any existing proxy
-                    tearDownProxy(el);
-
-                    if (url && /\/Audio\//i.test(url)) {
-                        postMessage('screensaverBypass', 'audio URL detected — attempting MSE proxy');
-
-                        var videoEl = _origCreateElement('video');
-                        videoEl.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-1;';
-                        videoEl.setAttribute('playsinline', '');
-
-                        // Append hidden <video> to body FIRST — MSE needs it in DOM
-                        document.body.appendChild(videoEl);
-
-                        var started = startMSEPlayback(videoEl, url);
-                        if (started) {
-                            postMessage('screensaverBypass', 'MSE started — setting up proxy');
-                            setupProxy(el, videoEl, url);
-                            return;
-                        }
-                        // MSE failed — remove the unused <video>
-                        document.body.removeChild(videoEl);
-                        postMessage('screensaverBypass', 'MSE failed — using native <audio> playback');
-                    }
-
-                    // Default: set src on the <audio> natively
-                    nativeSrcDesc.set.call(el, url);
-                },
-                configurable: true,
-                enumerable: true
-            });
-
-            // Also intercept setAttribute('src', ...) — some code paths use this
-            var _origSetAttribute = el.setAttribute.bind(el);
-            el.setAttribute = function (name, value) {
-                if (name === 'src') {
-                    el.src = value;
-                    return;
-                }
-                return _origSetAttribute(name, value);
-            };
-
-            // Intercept removeAttribute('src') — another way to clear source
-            var _origRemoveAttribute = el.removeAttribute.bind(el);
-            el.removeAttribute = function (name) {
-                if (name === 'src') {
-                    el.src = '';
-                    return;
-                }
-                return _origRemoveAttribute(name);
-            };
-
-            return el;
+        if (_sideChannelInterval) {
+            clearInterval(_sideChannelInterval);
+            _sideChannelInterval = null;
         }
-        return _origCreateElement.apply(document, arguments);
-    };
 
-    // Events to forward from <video> → <audio> so jellyfin-web's listeners fire.
-    // NOTE: 'error' is intentionally excluded — forwarding video errors would
-    // trigger jellyfin-web's onError handler which destroys the player. MSE
-    // errors are handled internally by fallbackToNative() instead.
-    var PROXY_EVENTS = ['playing', 'play', 'pause', 'ended', 'waiting',
-                        'timeupdate', 'volumechange', 'durationchange', 'canplay',
-                        'loadeddata', 'loadedmetadata', 'seeked', 'seeking'];
+        if (_sideChannelJMuxer) {
+            try { _sideChannelJMuxer.destroy(); } catch (e) { /* ignore */ }
+            _sideChannelJMuxer = null;
+        }
 
-    function setupProxy(audioEl, videoEl, originalUrl) {
-        audioEl._tizenProxy = {
-            videoEl: videoEl,
-            originalUrl: originalUrl,
-            eventForwarders: {},
-            autoplayPending: false
-        };
-        videoEl._proxyOwner = audioEl;
-        _proxyVideoEl = videoEl;
-
-        // Forward events from <video> to <audio>
-        PROXY_EVENTS.forEach(function (evtName) {
-            var forwarder = function (e) {
-                // Create and dispatch a matching event on the <audio>
-                try {
-                    var synth = new Event(evtName, { bubbles: e.bubbles, cancelable: e.cancelable });
-                    audioEl.dispatchEvent(synth);
-                } catch (err) {
-                    postMessage('screensaverBypass', { eventForwardError: evtName, err: err.message });
-                }
-            };
-            audioEl._tizenProxy.eventForwarders[evtName] = forwarder;
-            videoEl.addEventListener(evtName, forwarder);
-        });
-
-        // Store the URL so the getter returns it
-        audioEl._tizenProxiedSrc = originalUrl;
-
-        // Override play() — return a resolved promise immediately so jellyfin-web
-        // doesn't think playback failed. The actual video.play() happens when
-        // jMuxer's onReady fires and data is buffered.
-        audioEl._origPlay = audioEl.play;
-        audioEl.play = function () {
-            postMessage('screensaverBypass', 'proxied play() — returning resolved promise');
-            if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                var vid = audioEl._tizenProxy.videoEl;
-                // If video already has data, play it now; otherwise defer
-                if (vid.readyState >= 2) {
-                    postMessage('screensaverBypass', 'video ready — playing now');
-                    vid.play().catch(function (e) {
-                        postMessage('screensaverBypass', { videoPlayError: e.message });
-                    });
-                } else {
-                    postMessage('screensaverBypass', 'video not ready — deferring play to canplay');
-                    audioEl._tizenProxy.autoplayPending = true;
-                    vid.addEventListener('canplay', function onCanPlay() {
-                        vid.removeEventListener('canplay', onCanPlay);
-                        if (audioEl._tizenProxy) {
-                            postMessage('screensaverBypass', 'canplay fired — starting video playback');
-                            vid.play().catch(function (e) {
-                                postMessage('screensaverBypass', { deferredPlayError: e.message });
-                            });
-                        }
-                    });
-                }
-                // Return resolved promise to jellyfin-web so it doesn't error out
-                return Promise.resolve();
+        if (_sideChannelVideo) {
+            try { _sideChannelVideo.pause(); } catch (e) { /* ignore */ }
+            if (_sideChannelVideo.parentNode) {
+                _sideChannelVideo.parentNode.removeChild(_sideChannelVideo);
             }
-            return audioEl._origPlay.call(audioEl);
-        };
-
-        // Override pause() to delegate to the <video>
-        audioEl._origPause = audioEl.pause;
-        audioEl.pause = function () {
-            postMessage('screensaverBypass', 'proxied pause() → <video>');
-            if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                audioEl._tizenProxy.videoEl.pause();
-                return;
-            }
-            audioEl._origPause.call(audioEl);
-        };
-
-        // Proxy volume — jellyfin-web reads and writes .volume
-        var nativeVolumeDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
-        Object.defineProperty(audioEl, 'volume', {
-            get: function () {
-                if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                    return nativeVolumeDesc.get.call(audioEl._tizenProxy.videoEl);
-                }
-                return nativeVolumeDesc.get.call(audioEl);
-            },
-            set: function (v) {
-                if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                    nativeVolumeDesc.set.call(audioEl._tizenProxy.videoEl, v);
-                }
-                nativeVolumeDesc.set.call(audioEl, v);
-            },
-            configurable: true,
-            enumerable: true
-        });
-
-        // Proxy muted
-        var nativeMutedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'muted');
-        Object.defineProperty(audioEl, 'muted', {
-            get: function () {
-                if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                    return nativeMutedDesc.get.call(audioEl._tizenProxy.videoEl);
-                }
-                return nativeMutedDesc.get.call(audioEl);
-            },
-            set: function (v) {
-                if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                    nativeMutedDesc.set.call(audioEl._tizenProxy.videoEl, v);
-                }
-                nativeMutedDesc.set.call(audioEl, v);
-            },
-            configurable: true,
-            enumerable: true
-        });
-
-        // Proxy currentTime — jellyfin-web reads this for progress bar
-        var nativeCTDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
-        Object.defineProperty(audioEl, 'currentTime', {
-            get: function () {
-                if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                    return nativeCTDesc.get.call(audioEl._tizenProxy.videoEl);
-                }
-                return nativeCTDesc.get.call(audioEl);
-            },
-            set: function (v) {
-                if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                    nativeCTDesc.set.call(audioEl._tizenProxy.videoEl, v);
-                }
-                nativeCTDesc.set.call(audioEl, v);
-            },
-            configurable: true,
-            enumerable: true
-        });
-
-        // Proxy duration (read-only)
-        var nativeDurDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'duration');
-        Object.defineProperty(audioEl, 'duration', {
-            get: function () {
-                if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                    return nativeDurDesc.get.call(audioEl._tizenProxy.videoEl);
-                }
-                return nativeDurDesc.get.call(audioEl);
-            },
-            configurable: true,
-            enumerable: true
-        });
-
-        // Proxy paused (read-only)
-        var nativePausedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'paused');
-        Object.defineProperty(audioEl, 'paused', {
-            get: function () {
-                if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                    return nativePausedDesc.get.call(audioEl._tizenProxy.videoEl);
-                }
-                return nativePausedDesc.get.call(audioEl);
-            },
-            configurable: true,
-            enumerable: true
-        });
-
-        // Proxy ended (read-only)
-        var nativeEndedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'ended');
-        if (nativeEndedDesc) {
-            Object.defineProperty(audioEl, 'ended', {
-                get: function () {
-                    if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                        return nativeEndedDesc.get.call(audioEl._tizenProxy.videoEl);
-                    }
-                    return nativeEndedDesc.get.call(audioEl);
-                },
-                configurable: true,
-                enumerable: true
-            });
+            _sideChannelVideo = null;
         }
-
-        // Proxy buffered (read-only, TimeRanges)
-        var nativeBufferedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'buffered');
-        if (nativeBufferedDesc) {
-            Object.defineProperty(audioEl, 'buffered', {
-                get: function () {
-                    if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                        return nativeBufferedDesc.get.call(audioEl._tizenProxy.videoEl);
-                    }
-                    return nativeBufferedDesc.get.call(audioEl);
-                },
-                configurable: true,
-                enumerable: true
-            });
-        }
-
-        // Proxy readyState (read-only) — jellyfin-web checks this
-        var nativeReadyDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'readyState');
-        if (nativeReadyDesc) {
-            Object.defineProperty(audioEl, 'readyState', {
-                get: function () {
-                    if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                        return nativeReadyDesc.get.call(audioEl._tizenProxy.videoEl);
-                    }
-                    return nativeReadyDesc.get.call(audioEl);
-                },
-                configurable: true,
-                enumerable: true
-            });
-        }
-
-        // Proxy networkState (read-only)
-        var nativeNetDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'networkState');
-        if (nativeNetDesc) {
-            Object.defineProperty(audioEl, 'networkState', {
-                get: function () {
-                    if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                        return nativeNetDesc.get.call(audioEl._tizenProxy.videoEl);
-                    }
-                    return nativeNetDesc.get.call(audioEl);
-                },
-                configurable: true,
-                enumerable: true
-            });
-        }
-
-        // Proxy error (read-only)
-        var nativeErrorDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'error');
-        if (nativeErrorDesc) {
-            Object.defineProperty(audioEl, 'error', {
-                get: function () {
-                    if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                        return nativeErrorDesc.get.call(audioEl._tizenProxy.videoEl);
-                    }
-                    return nativeErrorDesc.get.call(audioEl);
-                },
-                configurable: true,
-                enumerable: true
-            });
-        }
-
-        // Handle autoplay: jellyfin-web sets elem.autoplay = true then calls play()
-        audioEl.autoplay = false; // prevent <audio> from trying to autoplay nothing
-
-        postMessage('screensaverBypass', 'proxy fully configured');
     }
 
-    function tearDownProxy(audioEl) {
-        if (!audioEl._tizenProxy) return;
+    // ============================================================
+    // Attach to audio elements: start side-channel when playing,
+    // stop when paused/ended
+    // ============================================================
 
-        postMessage('screensaverBypass', 'tearing down proxy');
-        var proxy = audioEl._tizenProxy;
-
-        // Stop MSE pipeline
-        stopMSEPlayback();
-
-        // Remove event forwarders
-        PROXY_EVENTS.forEach(function (evtName) {
-            if (proxy.eventForwarders[evtName]) {
-                proxy.videoEl.removeEventListener(evtName, proxy.eventForwarders[evtName]);
-            }
-        });
-
-        // Remove hidden <video> from DOM
-        if (proxy.videoEl.parentNode) {
-            proxy.videoEl.parentNode.removeChild(proxy.videoEl);
+    function onAudioPlaying(e) {
+        var el = e.target;
+        debugLog('[SIDE] audio playing event from ' + (el.src || '').substring(0, 60));
+        // Only start side-channel for actual audio content
+        if (el.src && /\/Audio\//i.test(el.src)) {
+            debugLog('[SIDE] audio URL detected — starting side channel');
+            startSideChannel();
+        } else {
+            debugLog('[SIDE] non-audio URL, skipping side channel');
         }
-
-        // Restore play/pause
-        if (audioEl._origPlay) { audioEl.play = audioEl._origPlay; delete audioEl._origPlay; }
-        if (audioEl._origPause) { audioEl.pause = audioEl._origPause; delete audioEl._origPause; }
-
-        // Clear proxy state
-        delete audioEl._tizenProxiedSrc;
-        delete audioEl._tizenProxy;
-        _proxyVideoEl = null;
     }
 
-    // Similar to jellyfin-web
+    function onAudioPaused() {
+        debugLog('[SIDE] audio paused');
+        stopSideChannel();
+    }
+
+    function onAudioEnded() {
+        debugLog('[SIDE] audio ended');
+        stopSideChannel();
+    }
+
+    // ============================================================
+    // Standard Tizen adapter (NativeShell, AppHost, etc.)
+    // ============================================================
+
     function generateDeviceId() {
         return btoa([navigator.userAgent, new Date().getTime()].join('|')).replace(/=/g, '1');
     }
 
     function getDeviceId() {
-        // Use variable '_deviceId2' to mimic jellyfin-web
         var deviceId = localStorage.getItem('_deviceId2');
-
         if (!deviceId) {
             deviceId = generateDeviceId();
             localStorage.setItem('_deviceId2', deviceId);
         }
-
         return deviceId;
     }
 
-    // Ensure server address is pre-filled and auto-authenticate test account
+    // Ensure server address is pre-filled
     var SERVER_URL = 'https://movies.great-tags.com';
     var SERVER_NAME = 'Jellyfin';
 
-    (function preFillAndAuth() {
+    (function preFillServer() {
         var creds = localStorage.getItem('jellyfin_credentials');
         var data = null;
         try { data = creds ? JSON.parse(creds) : null; } catch (e) { /* ignore */ }
         if (!data) data = { Servers: [] };
         if (!data.Servers) data.Servers = [];
 
-        // Find or create our server entry
         var entry = null;
         for (var i = 0; i < data.Servers.length; i++) {
             if (data.Servers[i].ManualAddress === SERVER_URL) {
@@ -829,7 +328,6 @@
         entry.Name = SERVER_NAME;
         entry.DateLastAccessed = Date.now();
 
-        // Save server entry (no auto-auth — user logs in manually)
         localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
         postMessage('serverPreFill', 'server entry saved (manual login)');
     })();
@@ -841,7 +339,6 @@
         appVersion: tizen.application.getCurrentApplication().appInfo.version
     };
 
-    // List of supported features
     var SupportedFeatures = [
         'exit',
         'exitmenu',
@@ -884,7 +381,7 @@
                     resolutionHeight: Math.floor(result.resolutionHeight * devicePixelRatio)
                 });
 
-                resolve(systeminfo)
+                resolve(systeminfo);
             });
         });
     }
@@ -920,7 +417,7 @@
 
             exit: function () {
                 postMessage('AppHost.exit');
-                stopMSEPlayback();
+                stopSideChannel();
 
                 try {
                     webapis.appcommon.setScreenSaver(
@@ -1059,10 +556,21 @@
     function attachMediaListeners(el) {
         if (el._tizenListenersAttached) return;
         el._tizenListenersAttached = true;
+
+        // Standard screensaver API calls
         el.addEventListener('playing', suppressScreenSaver);
         el.addEventListener('pause', restoreScreenSaver);
         el.addEventListener('ended', restoreScreenSaver);
         el.addEventListener('emptied', restoreScreenSaver);
+
+        // Side-channel: start/stop video-only MSE alongside audio
+        if (el.nodeName === 'AUDIO') {
+            debugLog('[SIDE] attaching side-channel listeners to <audio>');
+            el.addEventListener('playing', onAudioPlaying);
+            el.addEventListener('pause', onAudioPaused);
+            el.addEventListener('ended', onAudioEnded);
+            el.addEventListener('emptied', onAudioEnded);
+        }
     }
 
     // Watch for dynamically created media elements
