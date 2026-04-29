@@ -4,19 +4,31 @@
     console.log('Tizen adapter');
 
     // On-screen debug overlay — shows log messages directly on the TV
+    // Reduced to critical messages only, with larger font for readability on photos
     var _debugOverlay = null;
     var _debugLines = [];
-    var _MAX_DEBUG_LINES = 30;
+    var _MAX_DEBUG_LINES = 15;
+    // Only show messages matching these keywords (keep log concise on TV)
+    var _DEBUG_FILTER = ['TEARDOWN', 'srcSet', 'MSE started', 'MSE failed', 'proxy fully',
+        'proxied play', 'auth', 'error', 'fallback', 'jmuxerError', 'feedError',
+        'audio URL detected', 'audio stream', 'MSE ready'];
     function debugLog(msg) {
         var text = typeof msg === 'object' ? JSON.stringify(msg) : String(msg);
-        var ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-        _debugLines.push(ts + ' ' + text);
+        var ts = new Date().toLocaleTimeString('en-US', { hour12: false }).substring(0, 8);
+        var line = ts + ' ' + text;
+        // Always log to console, but only show filtered messages on overlay
+        var dominated = false;
+        for (var f = 0; f < _DEBUG_FILTER.length; f++) {
+            if (text.indexOf(_DEBUG_FILTER[f]) !== -1) { dominated = true; break; }
+        }
+        if (!dominated) return;
+        _debugLines.push(line);
         if (_debugLines.length > _MAX_DEBUG_LINES) _debugLines.shift();
         if (!_debugOverlay) {
             _debugOverlay = document.createElement('div');
             _debugOverlay.id = 'tizen-debug';
-            _debugOverlay.style.cssText = 'position:fixed;top:0;left:0;right:0;max-height:60vh;overflow-y:auto;' +
-                'background:rgba(0,0,0,0.85);color:#0f0;font:12px/1.4 monospace;padding:8px;z-index:999999;' +
+            _debugOverlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;max-height:50vh;overflow-y:auto;' +
+                'background:rgba(0,0,0,0.92);color:#0f0;font:16px/1.5 monospace;padding:10px;z-index:999999;' +
                 'pointer-events:none;white-space:pre-wrap;word-break:break-all;';
             (document.body || document.documentElement).appendChild(_debugOverlay);
         }
@@ -411,8 +423,21 @@
                 set: function (url) {
                     postMessage('screensaverBypass', { srcSet: url ? url.substring(0, 120) : url });
 
+                    // BLOCK src="" or src=null while proxy is active — jellyfin-web
+                    // does this as "cleanup" before/after playback, but it kills our
+                    // MSE proxy. Just swallow it and keep the proxy running.
+                    if (el._tizenProxy && (!url || url === '')) {
+                        try {
+                            throw new Error('src-clear-trace');
+                        } catch (traceErr) {
+                            postMessage('screensaverBypass', 'BLOCKED src="" while proxy active. Caller: ' +
+                                traceErr.stack.split('\n').slice(1, 5).join(' | '));
+                        }
+                        return; // swallow — don't tear down
+                    }
+
                     // Log who is setting src when proxy is active (debug)
-                    if (el._tizenProxy && (!url || !/\/Audio\//i.test(url))) {
+                    if (el._tizenProxy && !/\/Audio\//i.test(url)) {
                         try {
                             throw new Error('src-change-trace');
                         } catch (traceErr) {
@@ -451,6 +476,26 @@
                 configurable: true,
                 enumerable: true
             });
+
+            // Also intercept setAttribute('src', ...) — some code paths use this
+            var _origSetAttribute = el.setAttribute.bind(el);
+            el.setAttribute = function (name, value) {
+                if (name === 'src') {
+                    el.src = value;
+                    return;
+                }
+                return _origSetAttribute(name, value);
+            };
+
+            // Intercept removeAttribute('src') — another way to clear source
+            var _origRemoveAttribute = el.removeAttribute.bind(el);
+            el.removeAttribute = function (name) {
+                if (name === 'src') {
+                    el.src = '';
+                    return;
+                }
+                return _origRemoveAttribute(name);
+            };
 
             return el;
         }
@@ -726,8 +771,6 @@
     // Ensure server address is pre-filled and auto-authenticate test account
     var SERVER_URL = 'https://movies.great-tags.com';
     var SERVER_NAME = 'Jellyfin';
-    var AUTO_USER = 'claude';
-    var AUTO_PASS = 'claude';
 
     (function preFillAndAuth() {
         var creds = localStorage.getItem('jellyfin_credentials');
@@ -758,37 +801,9 @@
         entry.Name = SERVER_NAME;
         entry.DateLastAccessed = Date.now();
 
-        // If already authenticated (has AccessToken + UserId), just save and skip
-        if (entry.AccessToken && entry.UserId) {
-            localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
-            postMessage('serverPreFill', 'already authenticated');
-            return;
-        }
-
-        // Auto-authenticate via Jellyfin API
-        postMessage('serverPreFill', 'auto-authenticating as ' + AUTO_USER);
-        var deviceId = getDeviceId();
-        var xhr = new XMLHttpRequest();
-        xhr.open('POST', SERVER_URL + '/Users/AuthenticateByName', false); // synchronous
-        xhr.setRequestHeader('Content-Type', 'application/json');
-        xhr.setRequestHeader('X-Emby-Authorization',
-            'MediaBrowser Client="Jellyfin for Tizen", Device="Samsung Smart TV", DeviceId="' + deviceId + '", Version="0.10.0"');
-        try {
-            xhr.send(JSON.stringify({ Username: AUTO_USER, Pw: AUTO_PASS }));
-            if (xhr.status === 200) {
-                var resp = JSON.parse(xhr.responseText);
-                entry.AccessToken = resp.AccessToken;
-                entry.UserId = resp.User.Id;
-                localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
-                postMessage('serverPreFill', 'authenticated OK — token stored');
-            } else {
-                postMessage('serverPreFill', 'auth failed: HTTP ' + xhr.status);
-                localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
-            }
-        } catch (e) {
-            postMessage('serverPreFill', 'auth error: ' + e.message);
-            localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
-        }
+        // Save server entry (no auto-auth — user logs in manually)
+        localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
+        postMessage('serverPreFill', 'server entry saved (manual login)');
     })();
 
     var AppInfo = {
