@@ -3,6 +3,26 @@
 
     console.log('Tizen adapter');
 
+    // On-screen debug overlay — shows log messages directly on the TV
+    var _debugOverlay = null;
+    var _debugLines = [];
+    var _MAX_DEBUG_LINES = 30;
+    function debugLog(msg) {
+        var text = typeof msg === 'object' ? JSON.stringify(msg) : String(msg);
+        var ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+        _debugLines.push(ts + ' ' + text);
+        if (_debugLines.length > _MAX_DEBUG_LINES) _debugLines.shift();
+        if (!_debugOverlay) {
+            _debugOverlay = document.createElement('div');
+            _debugOverlay.id = 'tizen-debug';
+            _debugOverlay.style.cssText = 'position:fixed;top:0;left:0;right:0;max-height:60vh;overflow-y:auto;' +
+                'background:rgba(0,0,0,0.85);color:#0f0;font:12px/1.4 monospace;padding:8px;z-index:999999;' +
+                'pointer-events:none;white-space:pre-wrap;word-break:break-all;';
+            (document.body || document.documentElement).appendChild(_debugOverlay);
+        }
+        _debugOverlay.textContent = _debugLines.join('\n');
+    }
+
     // Screensaver bypass overview:
     //
     // Samsung OLED TVs force a screensaver after 2 min of static pixels. The
@@ -44,10 +64,13 @@
             'audio/mp4'
         ];
         var hasMS = typeof MediaSource !== 'undefined';
+        debugLog('[DIAG] MediaSource: ' + hasMS);
         console.log('[TIZEN-DIAG] MediaSource available:', hasMS);
         if (hasMS) {
             codecs.forEach(function (c) {
-                console.log('[TIZEN-DIAG] isTypeSupported(' + c + '):', MediaSource.isTypeSupported(c));
+                var supported = MediaSource.isTypeSupported(c);
+                debugLog('[DIAG] ' + c + ': ' + supported);
+                console.log('[TIZEN-DIAG] isTypeSupported(' + c + '):', supported);
             });
         }
     })();
@@ -132,6 +155,11 @@
 
     function postMessage() {
         console.log.apply(console, arguments);
+        var parts = [];
+        for (var a = 0; a < arguments.length; a++) {
+            parts.push(typeof arguments[a] === 'object' ? JSON.stringify(arguments[a]) : String(arguments[a]));
+        }
+        debugLog(parts.join(' '));
     }
 
     // Track active jMuxer instances for cleanup
