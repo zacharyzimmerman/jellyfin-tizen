@@ -143,6 +143,27 @@ Multiple fixes attempted:
 
 **Risk:** If the single-element limitation blocks ALL concurrent media elements regardless of audio tracks, this approach will fail the same way as the PiP approach — starting the video will pause the audio.
 
+## Approach 16: Source-Patched Audio-to-Video MSE (v0.12.0, Build 36)
+
+**Idea:** Instead of runtime interception, modify jellyfin-web's source code at build time. A Node.js patch script (`patches/apply-tizen-video-patch.cjs`) modifies `htmlAudioPlayer/plugin.js` before webpack builds it:
+
+1. `createMediaElement()` creates `<video>` instead of `<audio>` on Tizen (`browser.tizen` detection)
+2. The native playback path (which runs on Tizen since HLS.js is disabled for `browser.tizen`) checks for `/Audio/` URLs and routes them through `tizenMsePlay()` — a jMuxer MSE pipeline that muxes H.264 128x128 black keyframes + ADTS AAC audio into the `<video>` element
+3. `destroy()` and `stop()` clean up the jMuxer instance before resetting src
+
+**Key difference from proxy pattern (Builds 26-34):** The `<video>` IS `self._mediaElement` — no proxy, no stale references, no detached elements. All event listeners (timeupdate, ended, pause, etc.) are bound directly to the video element. `destroy()` operates on the actual element.
+
+**Key difference from side-channel (Build 35):** Only ONE media element exists. No second element to compete with the single-element limitation. The video decoder is active because jMuxer feeds real H.264 keyframes alongside the audio.
+
+**tizen.js simplified:** Removed all interception/side-channel code (~400 lines). Only provides NativeShell/AppHost adapter, server pre-fill, debug overlay, and belt-and-suspenders screensaver API calls.
+
+**Result on TV:** NOT YET TESTED.
+
+**Risks:**
+- jMuxer MSE buffering timing: `play()` may fire before MSE has buffered data. Mitigated by retry logic (play → fail → wait for canplay → retry).
+- ADTS extraction: If the audio stream isn't raw AAC/ADTS (e.g., it's Ogg, FLAC, or already muxed MP4), `extractADTSFrames()` will return 0 frames and the pipeline will reject — falling back to native `<video>` src assignment.
+- `<video>` playing non-MSE audio URLs: If jMuxer/MSE isn't available, the patch falls back to native `applySrc()` + `playWithPromise()` on the `<video>` element. Whether `<video>` can play raw audio URLs on Tizen is unconfirmed.
+
 ---
 
 ## Summary of What Works / Doesn't
@@ -163,9 +184,11 @@ Multiple fixes attempted:
 | jMuxer MSE 128x128 swap | N/A (stale reference) | N/A |
 | Proxy pattern (Builds 26-34) | **Untested** (player destroyed) | **No** — jellyfin-web destroys player |
 | Side-channel muted video (Build 35) | **Untested** | **Unknown** — depends on single-element scope |
+| Source-patched audio-to-video MSE (Build 36) | **Untested** | **Likely yes** — single element, audio in MSE |
 
 **The fundamental unanswered questions:**
-1. Does a muted `<video>` with no audio track count toward the single-element limitation?
-2. Does H.264 via MSE on a hidden element actually suppress the OLED screensaver?
+1. Does H.264 via MSE on a `<video>` element actually suppress the OLED screensaver?
+2. Does jMuxer's fMP4 muxing of H.264+AAC produce playable output on Tizen's MSE implementation?
+3. Can the ADTS extraction handle the audio format Jellyfin/Navidrome serves?
 
-Neither has been tested on the actual TV yet.
+None have been tested on the actual TV yet.

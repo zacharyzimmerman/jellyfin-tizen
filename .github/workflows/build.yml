@@ -47,6 +47,9 @@ jobs:
           ${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin/tizen cli-config "profiles.path=${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml"
           chmod 755 "${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml"
 
+      - name: Patch jellyfin-web for Tizen MSE
+        run: node patches/apply-tizen-video-patch.cjs jellyfin-web
+
       - name: Build jellyfin-web
         run: |
           cd jellyfin-web

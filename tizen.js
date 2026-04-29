@@ -24,97 +24,44 @@
         _debugOverlay.textContent = _debugLines.join('\n');
     }
 
-    // Screensaver bypass: side-channel video-only MSE
+    // Screensaver bypass strategy (Build 36):
     //
-    // Samsung OLED TVs force a screensaver after 2 min of static pixels. The
-    // firmware only suppresses it when the HARDWARE VIDEO DECODER is active.
+    // The jellyfin-web htmlAudioPlayer plugin has been PATCHED at build time
+    // (patches/apply-tizen-video-patch.cjs) to:
+    //   1. Create <video> instead of <audio> on Tizen (browser.tizen detection)
+    //   2. Route audio URLs through jMuxer MSE (H.264 + AAC) so the hardware
+    //      video decoder is active during audio playback
+    //   3. Clean up jMuxer on destroy()/stop()
     //
-    // Previous approach (proxy pattern) intercepted createElement('audio') and
-    // tried to proxy all playback through a hidden <video> with MSE. This failed
-    // because jellyfin-web's htmlAudioPlayer.destroy() fires immediately after
-    // play(), removing all event listeners and abandoning the player. No amount
-    // of interception can prevent jellyfin-web from destroying the player.
-    //
-    // New approach: DON'T INTERCEPT ANYTHING. Let jellyfin-web's native audio
-    // playback work 100% unmodified. Separately, when audio starts playing,
-    // create a hidden <video> element and feed it H.264-only keyframes via
-    // jMuxer's MSE pipeline (video-only mode, no audio track). This keeps the
-    // hardware video decoder active without competing for the audio output.
-    //
-    // The single-element limitation may only apply when both elements produce
-    // audio. A muted video-only MSE stream may coexist with native audio.
+    // tizen.js no longer needs to intercept or proxy anything. It just provides:
+    //   - NativeShell/AppHost adapter (required by jellyfin-web)
+    //   - Server pre-fill for https://movies.great-tags.com
+    //   - Belt-and-suspenders screensaver API calls (AppCommon + Power API)
+    //   - Debug overlay for on-TV diagnostics
+    //   - jMuxer availability check (loaded via <script> tag in index.html)
 
-    // Pre-baked H.264 elementary stream: 128x128 black, constrained baseline, level 1.3, 1fps
-    var H264_BASE64 = 'AAAAAWdCwA3cIEbARAAAAwAEAAADAAg8UK4AAAABaM4BlEyAAAABBgX//1zcRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIzIDA0ODBjYjAgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MSBkZWJsb2NrPTE6LTM6LTMgYW5hbHlzZT0weDE6MHgxMTEgbWU9aGV4IHN1Ym1lPTcgcHN5PTEgcHN5X3JkPTIuMDA6MC43MCBtaXhlZF9yZWY9MCBtZV9yYW5nZT0xNiBjaHJvbWFfbWU9MSB0cmVsbGlzPTEgOHg4ZGN0PTAgY3FtPTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0xIGNocm9tYV9xcF9vZmZzZXQ9LTQgdGhyZWFkcz00IGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MCB3ZWlnaHRwPTAga2V5aW50PTEga2V5aW50X21pbj0xIHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByYz1jcmYgbWJ0cmVlPTAgY3JmPTUxLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjIwAIAAAAFliIQFc5yYoAAhIybk5OTk5OTrdddddddddddddddddddddddddddddddddddddddddddddddddddddddeAAAAAWdCwA3cIEbARAAAAwAEAAADAAg8UK4AAAABaM4BlEyAAAABZYiCAIM5yYoAAk1ycnJycnJyddddddddddddddddddddddddddddddddddddddddddddddddddddddddeAAAAAFnQsAN3CBGwEQAAAMABAAAAwAIPFCuAAAAAWjOAZRMgAAAAWWIhAIM5yYoAAk1ycnJycnJyddddddddddddddddddddddddddddddddddddddddddddddddddddddddeAAAAABZ0LADdwgRsBEAAADAAQAAAMACDxQrgAAAAFozgGUTIAAAAFliIIAgznJigACTXJycnJycnJ111111111111111111111111111111111111111111111111111111114AAAAAWdCwA3cIEbARAAAAwAEAAADAAg8UK4AAAABaM4BlEyAAAABZYiEAgznJigACTXJycnJycnJ111111111111111111111111111111111111111111111111111111114A==';
+    // Verify jMuxer is loaded (injected by gulpfile into index.html)
+    if (typeof JMuxer !== 'undefined') {
+        debugLog('[INIT] JMuxer loaded: v' + (JMuxer.version || 'unknown'));
+    } else {
+        debugLog('[INIT] WARNING: JMuxer not loaded — MSE patch will fall back to native audio');
+    }
 
-    // Run MSE codec diagnostics at startup
+    // MSE codec diagnostics
     (function diagnoseMSE() {
         var codecs = [
             'video/mp4; codecs="avc1.42c00d"',
             'video/mp4; codecs="avc1.42c00d,mp4a.40.2"',
-            'video/mp4; codecs="avc1.42E01E"',
-            'audio/mp4; codecs="mp4a.40.2"',
-            'video/mp4',
-            'audio/mp4'
+            'audio/mp4; codecs="mp4a.40.2"'
         ];
         var hasMS = typeof MediaSource !== 'undefined';
         debugLog('[DIAG] MediaSource: ' + hasMS);
         if (hasMS) {
             codecs.forEach(function (c) {
-                var supported = MediaSource.isTypeSupported(c);
-                debugLog('[DIAG] ' + c + ': ' + supported);
+                debugLog('[DIAG] ' + c + ': ' + MediaSource.isTypeSupported(c));
             });
         }
     })();
-
-    function base64ToUint8Array(base64) {
-        var binary = atob(base64);
-        var bytes = new Uint8Array(binary.length);
-        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        return bytes;
-    }
-
-    // Parse H.264 annex-b NAL units and build a reusable keyframe (SPS+PPS+IDR)
-    function buildKeyframe(data) {
-        var nals = [];
-        var i = 0;
-        while (i < data.length - 4) {
-            var startCodeLen = 0;
-            if (data[i] === 0 && data[i+1] === 0 && data[i+2] === 0 && data[i+3] === 1) {
-                startCodeLen = 4;
-            } else if (data[i] === 0 && data[i+1] === 0 && data[i+2] === 1) {
-                startCodeLen = 3;
-            }
-            if (startCodeLen > 0) {
-                var end = data.length;
-                for (var j = i + startCodeLen; j < data.length - 3; j++) {
-                    if ((data[j] === 0 && data[j+1] === 0 && data[j+2] === 0 && data[j+3] === 1) ||
-                        (data[j] === 0 && data[j+1] === 0 && data[j+2] === 1)) {
-                        end = j;
-                        break;
-                    }
-                }
-                var nalType = data[i + startCodeLen] & 0x1F;
-                nals.push({ type: nalType, data: data.slice(i, end) });
-                i = end;
-            } else {
-                i++;
-            }
-        }
-        var sps = nals.filter(function (n) { return n.type === 7; })[0];
-        var pps = nals.filter(function (n) { return n.type === 8; })[0];
-        var idr = nals.filter(function (n) { return n.type === 5; })[0];
-        if (!sps || !pps || !idr) return null;
-        var kf = new Uint8Array(sps.data.length + pps.data.length + idr.data.length);
-        kf.set(sps.data, 0);
-        kf.set(pps.data, sps.data.length);
-        kf.set(idr.data, sps.data.length + pps.data.length);
-        return kf;
-    }
-
-    // Build the H.264 keyframe data once at startup
-    var h264Data = base64ToUint8Array(H264_BASE64);
-    var h264Keyframe = buildKeyframe(h264Data);
 
     function postMessage() {
         console.log.apply(console, arguments);
@@ -123,160 +70,6 @@
             parts.push(typeof arguments[a] === 'object' ? JSON.stringify(arguments[a]) : String(arguments[a]));
         }
         debugLog(parts.join(' '));
-    }
-
-    // ============================================================
-    // Side-channel video-only MSE: keeps hardware decoder active
-    // without interfering with jellyfin-web's audio playback
-    // ============================================================
-
-    var _sideChannelVideo = null;
-    var _sideChannelJMuxer = null;
-    var _sideChannelInterval = null;
-    var _sideChannelActive = false;
-
-    function startSideChannel() {
-        if (_sideChannelActive) {
-            debugLog('[SIDE] already active');
-            return;
-        }
-
-        if (!h264Keyframe) {
-            debugLog('[SIDE] no H.264 keyframe data');
-            return;
-        }
-
-        if (typeof JMuxer === 'undefined') {
-            debugLog('[SIDE] JMuxer not loaded');
-            return;
-        }
-
-        if (typeof MediaSource === 'undefined') {
-            debugLog('[SIDE] MediaSource not available');
-            return;
-        }
-
-        var videoOnlyType = 'video/mp4; codecs="avc1.42c00d"';
-        if (!MediaSource.isTypeSupported(videoOnlyType)) {
-            debugLog('[SIDE] video-only MSE not supported');
-            return;
-        }
-
-        debugLog('[SIDE] starting video-only MSE');
-        _sideChannelActive = true;
-
-        // Create hidden video element
-        var videoEl = document.createElement('video');
-        videoEl.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-1;';
-        videoEl.setAttribute('playsinline', '');
-        videoEl.muted = true; // critical: no audio output from this element
-        videoEl.volume = 0;
-        document.body.appendChild(videoEl);
-        _sideChannelVideo = videoEl;
-
-        try {
-            var jmuxer = new JMuxer({
-                node: videoEl,
-                mode: 'video',  // VIDEO ONLY — no audio track
-                fps: 1,
-                flushingTime: 1000,
-                maxDelay: 5000,
-                clearBuffer: false,
-                debug: false,
-                onReady: function () {
-                    debugLog('[SIDE] MSE ready — feeding initial keyframes');
-                    try {
-                        // Feed initial H.264 data to set up the video track
-                        jmuxer.feed({ video: h264Data, duration: 1000 });
-
-                        // Start periodic keyframe feeding (1 fps)
-                        _sideChannelInterval = setInterval(function () {
-                            if (_sideChannelJMuxer && _sideChannelActive) {
-                                try {
-                                    _sideChannelJMuxer.feed({ video: h264Keyframe, duration: 1000 });
-                                } catch (e) {
-                                    debugLog('[SIDE] feed error: ' + e.message);
-                                }
-                            }
-                        }, 1000);
-
-                        // Try to play the video
-                        videoEl.play().then(function () {
-                            debugLog('[SIDE] video playing');
-                        }).catch(function (e) {
-                            debugLog('[SIDE] play error: ' + e.message);
-                        });
-                    } catch (e) {
-                        debugLog('[SIDE] init feed error: ' + e.message);
-                        stopSideChannel();
-                    }
-                },
-                onError: function (err) {
-                    debugLog('[SIDE] jMuxer error: ' + JSON.stringify(err));
-                    stopSideChannel();
-                }
-            });
-            _sideChannelJMuxer = jmuxer;
-        } catch (e) {
-            debugLog('[SIDE] jMuxer init error: ' + e.message);
-            _sideChannelActive = false;
-            if (_sideChannelVideo && _sideChannelVideo.parentNode) {
-                _sideChannelVideo.parentNode.removeChild(_sideChannelVideo);
-            }
-            _sideChannelVideo = null;
-        }
-    }
-
-    function stopSideChannel() {
-        if (!_sideChannelActive) return;
-
-        debugLog('[SIDE] stopping video-only MSE');
-        _sideChannelActive = false;
-
-        if (_sideChannelInterval) {
-            clearInterval(_sideChannelInterval);
-            _sideChannelInterval = null;
-        }
-
-        if (_sideChannelJMuxer) {
-            try { _sideChannelJMuxer.destroy(); } catch (e) { /* ignore */ }
-            _sideChannelJMuxer = null;
-        }
-
-        if (_sideChannelVideo) {
-            try { _sideChannelVideo.pause(); } catch (e) { /* ignore */ }
-            if (_sideChannelVideo.parentNode) {
-                _sideChannelVideo.parentNode.removeChild(_sideChannelVideo);
-            }
-            _sideChannelVideo = null;
-        }
-    }
-
-    // ============================================================
-    // Attach to audio elements: start side-channel when playing,
-    // stop when paused/ended
-    // ============================================================
-
-    function onAudioPlaying(e) {
-        var el = e.target;
-        debugLog('[SIDE] audio playing event from ' + (el.src || '').substring(0, 60));
-        // Only start side-channel for actual audio content
-        if (el.src && /\/Audio\//i.test(el.src)) {
-            debugLog('[SIDE] audio URL detected — starting side channel');
-            startSideChannel();
-        } else {
-            debugLog('[SIDE] non-audio URL, skipping side channel');
-        }
-    }
-
-    function onAudioPaused() {
-        debugLog('[SIDE] audio paused');
-        stopSideChannel();
-    }
-
-    function onAudioEnded() {
-        debugLog('[SIDE] audio ended');
-        stopSideChannel();
     }
 
     // ============================================================
@@ -417,7 +210,6 @@
 
             exit: function () {
                 postMessage('AppHost.exit');
-                stopSideChannel();
 
                 try {
                     webapis.appcommon.setScreenSaver(
@@ -557,20 +349,39 @@
         if (el._tizenListenersAttached) return;
         el._tizenListenersAttached = true;
 
-        // Standard screensaver API calls
-        el.addEventListener('playing', suppressScreenSaver);
-        el.addEventListener('pause', restoreScreenSaver);
-        el.addEventListener('ended', restoreScreenSaver);
-        el.addEventListener('emptied', restoreScreenSaver);
+        var tag = el.nodeName;
+        debugLog('[MEDIA] attaching listeners to <' + tag + '>');
 
-        // Side-channel: start/stop video-only MSE alongside audio
-        if (el.nodeName === 'AUDIO') {
-            debugLog('[SIDE] attaching side-channel listeners to <audio>');
-            el.addEventListener('playing', onAudioPlaying);
-            el.addEventListener('pause', onAudioPaused);
-            el.addEventListener('ended', onAudioEnded);
-            el.addEventListener('emptied', onAudioEnded);
-        }
+        // Standard screensaver API calls
+        el.addEventListener('playing', function () {
+            debugLog('[MEDIA] <' + tag + '> playing — src=' + (el.src || '').substring(0, 60));
+            suppressScreenSaver();
+        });
+        el.addEventListener('pause', function () {
+            debugLog('[MEDIA] <' + tag + '> paused');
+            restoreScreenSaver();
+        });
+        el.addEventListener('ended', function () {
+            debugLog('[MEDIA] <' + tag + '> ended');
+            restoreScreenSaver();
+        });
+        el.addEventListener('emptied', function () {
+            debugLog('[MEDIA] <' + tag + '> emptied');
+            restoreScreenSaver();
+        });
+
+        // Log MSE-related events for diagnostics
+        el.addEventListener('error', function () {
+            var code = el.error ? el.error.code : 0;
+            var msg = el.error ? el.error.message : '';
+            debugLog('[MEDIA] <' + tag + '> error: ' + code + ' ' + msg);
+        });
+        el.addEventListener('canplay', function () {
+            debugLog('[MEDIA] <' + tag + '> canplay');
+        });
+        el.addEventListener('loadeddata', function () {
+            debugLog('[MEDIA] <' + tag + '> loadeddata');
+        });
     }
 
     // Watch for dynamically created media elements
