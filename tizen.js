@@ -504,8 +504,11 @@
         return _origCreateElement.apply(document, arguments);
     };
 
-    // Events to forward from <video> → <audio> so jellyfin-web's listeners fire
-    var PROXY_EVENTS = ['playing', 'play', 'pause', 'ended', 'waiting', 'error',
+    // Events to forward from <video> → <audio> so jellyfin-web's listeners fire.
+    // NOTE: 'error' is intentionally excluded — forwarding video errors would
+    // trigger jellyfin-web's onError handler which destroys the player. MSE
+    // errors are handled internally by fallbackToNative() instead.
+    var PROXY_EVENTS = ['playing', 'play', 'pause', 'ended', 'waiting',
                         'timeupdate', 'volumechange', 'durationchange', 'canplay',
                         'loadeddata', 'loadedmetadata', 'seeked', 'seeking'];
 
@@ -537,12 +540,35 @@
         // Store the URL so the getter returns it
         audioEl._tizenProxiedSrc = originalUrl;
 
-        // Override play() to delegate to the <video>
+        // Override play() — return a resolved promise immediately so jellyfin-web
+        // doesn't think playback failed. The actual video.play() happens when
+        // jMuxer's onReady fires and data is buffered.
         audioEl._origPlay = audioEl.play;
         audioEl.play = function () {
-            postMessage('screensaverBypass', 'proxied play() → <video>');
+            postMessage('screensaverBypass', 'proxied play() — returning resolved promise');
             if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
-                return audioEl._tizenProxy.videoEl.play();
+                var vid = audioEl._tizenProxy.videoEl;
+                // If video already has data, play it now; otherwise defer
+                if (vid.readyState >= 2) {
+                    postMessage('screensaverBypass', 'video ready — playing now');
+                    vid.play().catch(function (e) {
+                        postMessage('screensaverBypass', { videoPlayError: e.message });
+                    });
+                } else {
+                    postMessage('screensaverBypass', 'video not ready — deferring play to canplay');
+                    audioEl._tizenProxy.autoplayPending = true;
+                    vid.addEventListener('canplay', function onCanPlay() {
+                        vid.removeEventListener('canplay', onCanPlay);
+                        if (audioEl._tizenProxy) {
+                            postMessage('screensaverBypass', 'canplay fired — starting video playback');
+                            vid.play().catch(function (e) {
+                                postMessage('screensaverBypass', { deferredPlayError: e.message });
+                            });
+                        }
+                    });
+                }
+                // Return resolved promise to jellyfin-web so it doesn't error out
+                return Promise.resolve();
             }
             return audioEl._origPlay.call(audioEl);
         };
