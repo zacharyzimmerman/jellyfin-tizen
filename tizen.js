@@ -411,6 +411,16 @@
                 set: function (url) {
                     postMessage('screensaverBypass', { srcSet: url ? url.substring(0, 120) : url });
 
+                    // Log who is setting src when proxy is active (debug)
+                    if (el._tizenProxy && (!url || !/\/Audio\//i.test(url))) {
+                        try {
+                            throw new Error('src-change-trace');
+                        } catch (traceErr) {
+                            postMessage('screensaverBypass', 'PROXY TEARDOWN TRIGGERED BY: ' +
+                                traceErr.stack.split('\n').slice(1, 5).join(' | '));
+                        }
+                    }
+
                     // Tear down any existing proxy
                     tearDownProxy(el);
 
@@ -608,6 +618,51 @@
                         return nativeBufferedDesc.get.call(audioEl._tizenProxy.videoEl);
                     }
                     return nativeBufferedDesc.get.call(audioEl);
+                },
+                configurable: true,
+                enumerable: true
+            });
+        }
+
+        // Proxy readyState (read-only) — jellyfin-web checks this
+        var nativeReadyDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'readyState');
+        if (nativeReadyDesc) {
+            Object.defineProperty(audioEl, 'readyState', {
+                get: function () {
+                    if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
+                        return nativeReadyDesc.get.call(audioEl._tizenProxy.videoEl);
+                    }
+                    return nativeReadyDesc.get.call(audioEl);
+                },
+                configurable: true,
+                enumerable: true
+            });
+        }
+
+        // Proxy networkState (read-only)
+        var nativeNetDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'networkState');
+        if (nativeNetDesc) {
+            Object.defineProperty(audioEl, 'networkState', {
+                get: function () {
+                    if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
+                        return nativeNetDesc.get.call(audioEl._tizenProxy.videoEl);
+                    }
+                    return nativeNetDesc.get.call(audioEl);
+                },
+                configurable: true,
+                enumerable: true
+            });
+        }
+
+        // Proxy error (read-only)
+        var nativeErrorDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'error');
+        if (nativeErrorDesc) {
+            Object.defineProperty(audioEl, 'error', {
+                get: function () {
+                    if (audioEl._tizenProxy && audioEl._tizenProxy.videoEl) {
+                        return nativeErrorDesc.get.call(audioEl._tizenProxy.videoEl);
+                    }
+                    return nativeErrorDesc.get.call(audioEl);
                 },
                 configurable: true,
                 enumerable: true
