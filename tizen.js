@@ -9,9 +9,9 @@
     var _debugLines = [];
     var _MAX_DEBUG_LINES = 15;
     // Only show messages matching these keywords (keep log concise on TV)
-    var _DEBUG_FILTER = ['TEARDOWN', 'srcSet', 'MSE started', 'MSE failed', 'proxy fully',
+    var _DEBUG_FILTER = ['TEARDOWN', 'BLOCKED', 'srcSet', 'MSE started', 'MSE failed', 'proxy fully',
         'proxied play', 'auth', 'error', 'fallback', 'jmuxerError', 'feedError',
-        'audio URL detected', 'audio stream', 'MSE ready'];
+        'audio URL detected', 'audio stream', 'MSE ready', '  at '];
     function debugLog(msg) {
         var text = typeof msg === 'object' ? JSON.stringify(msg) : String(msg);
         var ts = new Date().toLocaleTimeString('en-US', { hour12: false }).substring(0, 8);
@@ -27,8 +27,8 @@
         if (!_debugOverlay) {
             _debugOverlay = document.createElement('div');
             _debugOverlay.id = 'tizen-debug';
-            _debugOverlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;max-height:50vh;overflow-y:auto;' +
-                'background:rgba(0,0,0,0.92);color:#0f0;font:16px/1.5 monospace;padding:10px;z-index:999999;' +
+            _debugOverlay.style.cssText = 'position:fixed;top:0;left:0;width:33%;max-height:80vh;overflow-y:auto;' +
+                'background:rgba(0,0,0,0.92);color:#0f0;font:14px/1.4 monospace;padding:8px;z-index:999999;' +
                 'pointer-events:none;white-space:pre-wrap;word-break:break-all;';
             (document.body || document.documentElement).appendChild(_debugOverlay);
         }
@@ -430,8 +430,11 @@
                         try {
                             throw new Error('src-clear-trace');
                         } catch (traceErr) {
-                            postMessage('screensaverBypass', 'BLOCKED src="" while proxy active. Caller: ' +
-                                traceErr.stack.split('\n').slice(1, 5).join(' | '));
+                            var frames = traceErr.stack.split('\n').slice(1, 6);
+                            postMessage('screensaverBypass', 'BLOCKED src=""');
+                            frames.forEach(function (f) {
+                                postMessage('screensaverBypass', '  ' + f.trim());
+                            });
                         }
                         return; // swallow — don't tear down
                     }
@@ -441,8 +444,11 @@
                         try {
                             throw new Error('src-change-trace');
                         } catch (traceErr) {
-                            postMessage('screensaverBypass', 'PROXY TEARDOWN TRIGGERED BY: ' +
-                                traceErr.stack.split('\n').slice(1, 5).join(' | '));
+                            var frames2 = traceErr.stack.split('\n').slice(1, 6);
+                            postMessage('screensaverBypass', 'TEARDOWN BY non-audio src:');
+                            frames2.forEach(function (f) {
+                                postMessage('screensaverBypass', '  ' + f.trim());
+                            });
                         }
                     }
 
