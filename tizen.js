@@ -668,24 +668,48 @@
         return deviceId;
     }
 
-    // Pre-fill server address on first launch so user doesn't have to type it
+    // Ensure server address is pre-filled so user doesn't have to type it
     (function preFillServer() {
         var SERVER_URL = 'https://movies.great-tags.com';
+        var SERVER_NAME = 'Jellyfin';
         var creds = localStorage.getItem('jellyfin_credentials');
-        if (!creds) {
+        var data = null;
+        try { data = creds ? JSON.parse(creds) : null; } catch (e) { /* ignore */ }
+
+        // Check if our server already exists with proper fields
+        var dominated = false;
+        if (data && data.Servers) {
+            for (var i = 0; i < data.Servers.length; i++) {
+                if (data.Servers[i].ManualAddress === SERVER_URL) {
+                    // Fix missing Name on existing entry
+                    if (!data.Servers[i].Name) {
+                        data.Servers[i].Name = SERVER_NAME;
+                        localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
+                        postMessage('serverPreFill', 'patched Name on existing server entry');
+                    }
+                    dominated = true;
+                    break;
+                }
+            }
+        }
+
+        if (!dominated) {
             var id = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/x/g, function () {
                 return (Math.random() * 16 | 0).toString(16);
             });
-            localStorage.setItem('jellyfin_credentials', JSON.stringify({
-                Servers: [{
-                    Id: id,
-                    ManualAddress: SERVER_URL,
-                    LastConnectionMode: 2,
-                    manualAddressOnly: true,
-                    DateLastAccessed: Date.now()
-                }]
-            }));
-            postMessage('serverPreFill', 'pre-filled server: ' + SERVER_URL);
+            var entry = {
+                Id: id,
+                Name: SERVER_NAME,
+                ManualAddress: SERVER_URL,
+                LastConnectionMode: 2,
+                manualAddressOnly: true,
+                DateLastAccessed: Date.now()
+            };
+            if (!data) data = { Servers: [] };
+            if (!data.Servers) data.Servers = [];
+            data.Servers.unshift(entry);
+            localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
+            postMessage('serverPreFill', 'added server: ' + SERVER_URL);
         }
     })();
 
