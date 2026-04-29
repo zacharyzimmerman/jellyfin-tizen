@@ -10,11 +10,16 @@
     // Tizen also has a single media element limitation — only one <audio> or
     // <video> can play at a time.
     //
-    // Solution: intercept document.createElement so that <audio> elements
-    // become <video> elements, then intercept the src setter to redirect audio
-    // playback through jMuxer's MSE pipeline. jMuxer combines the audio with
-    // pre-baked H.264 black video frames in a single SourceBuffer, engaging
-    // the hardware video decoder and suppressing the screensaver.
+    // Solution: intercept document.createElement('audio') and add a src setter
+    // hook to the returned <audio> element. When jellyfin-web sets an audio
+    // URL, we swap the <audio> for a <video> in the DOM and route playback
+    // through jMuxer's MSE pipeline. jMuxer combines AAC audio with pre-baked
+    // H.264 black video frames in a single SourceBuffer, engaging the hardware
+    // video decoder and suppressing the screensaver.
+    //
+    // IMPORTANT: createElement still returns a real <audio> element (not <video>)
+    // so that jellyfin-web's device profile probing via canPlayType() works
+    // correctly on Tizen. The swap to <video> only happens at playback time.
 
     // Pre-baked H.264 elementary stream: 128x128 black, constrained baseline, level 1.3, 1fps
     // Contains SPS + PPS + SEI + 5 IDR frames. We extract SPS+PPS+IDR for
@@ -216,9 +221,17 @@
 
     // Fall back to native audio playback if MSE fails on the TV
     function fallbackToNative(videoEl, originalUrl) {
-        postMessage('screensaverBypass', 'MSE failed — falling back to native audio playback');
+        postMessage('screensaverBypass', 'MSE runtime error — falling back to native audio playback');
         stopMSEPlayback();
-        if (nativeSrcDesc) {
+
+        // If we have the original <audio> element, swap it back in
+        var audioEl = videoEl._originalAudioEl;
+        if (audioEl && videoEl.parentNode) {
+            postMessage('screensaverBypass', 'restoring original <audio> element');
+            videoEl.parentNode.replaceChild(audioEl, videoEl);
+            nativeSrcDesc.set.call(audioEl, originalUrl);
+        } else if (nativeSrcDesc) {
+            // Can't swap back — try playing on the video element directly
             nativeSrcDesc.set.call(videoEl, originalUrl);
         }
     }
@@ -337,37 +350,79 @@
         }
     }
 
-    // Override document.createElement: swap <audio> for <video> and intercept src
+    // Override document.createElement: hook <audio> src setter for late swap to <video>
     var _origCreateElement = document.createElement.bind(document);
     document.createElement = function (tagName) {
         if (tagName && tagName.toLowerCase() === 'audio') {
-            postMessage('screensaverBypass', 'replacing <audio> with <video>');
-            var el = _origCreateElement('video');
-            el.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-1;';
-            el.setAttribute('playsinline', '');
-            el._tizenAudioSwap = true;
+            // Return a REAL <audio> element — this preserves canPlayType() behavior
+            // for jellyfin-web's device profile probing (browserDeviceProfile.js).
+            var el = _origCreateElement('audio');
+            el._tizenHooked = true;
 
-            // Intercept the src setter to redirect through jMuxer MSE pipeline
+            postMessage('screensaverBypass', 'hooking <audio> src setter');
+
+            // Intercept the src setter. When an actual audio playback URL is set,
+            // swap this <audio> for a <video> in the DOM and use jMuxer MSE.
             Object.defineProperty(el, 'src', {
                 get: function () {
                     return nativeSrcDesc.get.call(el);
                 },
                 set: function (url) {
-                    postMessage('screensaverBypass', { srcSet: url ? url.substring(0, 100) + '...' : url });
+                    postMessage('screensaverBypass', { srcSet: url ? url.substring(0, 120) : url });
 
-                    // If this is a Jellyfin audio URL, try MSE pipeline
+                    // Only intercept Jellyfin audio playback URLs
                     if (url && /\/Audio\//i.test(url)) {
-                        var started = startMSEPlayback(el, url);
+                        postMessage('screensaverBypass', 'audio URL detected — attempting MSE swap');
+
+                        // Create a <video> element to replace this <audio>
+                        var videoEl = _origCreateElement('video');
+                        videoEl.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-1;';
+                        videoEl.setAttribute('playsinline', '');
+                        videoEl._tizenAudioSwap = true;
+                        videoEl._originalAudioEl = el;
+
+                        // Copy over relevant attributes and classes
+                        for (var i = 0; i < el.classList.length; i++) {
+                            videoEl.classList.add(el.classList[i]);
+                        }
+
+                        // Try to start MSE pipeline on the video element
+                        var started = startMSEPlayback(videoEl, url);
                         if (started) {
-                            // Store the original URL for reference
-                            el._originalAudioSrc = url;
+                            postMessage('screensaverBypass', 'MSE started — swapping <audio> for <video> in DOM');
+
+                            // Replace <audio> in DOM if it's attached
+                            if (el.parentNode) {
+                                el.parentNode.replaceChild(videoEl, el);
+                            }
+
+                            // Patch jellyfin-web's reference: htmlAudioPlayer stores its
+                            // element in _mediaElement and also queries '.mediaPlayerAudio'
+                            videoEl._originalAudioSrc = url;
+
+                            // Hook the video element's src setter too for subsequent URL changes
+                            Object.defineProperty(videoEl, 'src', {
+                                get: function () { return nativeSrcDesc.get.call(videoEl); },
+                                set: function (vUrl) {
+                                    postMessage('screensaverBypass', { videoSrcSet: vUrl ? vUrl.substring(0, 120) : vUrl });
+                                    if (vUrl && /\/Audio\//i.test(vUrl)) {
+                                        var restarted = startMSEPlayback(videoEl, vUrl);
+                                        if (restarted) { videoEl._originalAudioSrc = vUrl; return; }
+                                    }
+                                    if (!vUrl || !vUrl.startsWith('blob:')) stopMSEPlayback();
+                                    nativeSrcDesc.set.call(videoEl, vUrl);
+                                },
+                                configurable: true,
+                                enumerable: true
+                            });
+
                             return;
                         }
+
+                        postMessage('screensaverBypass', 'MSE failed — using native <audio> playback');
                     }
 
-                    // Fallback: native playback (works but won't suppress screensaver)
-                    // Don't destroy MSE pipeline when JMuxer sets its internal blob: URL
-                    if (!url || !url.startsWith('blob:')) stopMSEPlayback();
+                    // Default: set src on the <audio> element natively
                     nativeSrcDesc.set.call(el, url);
                 },
                 configurable: true,
@@ -395,6 +450,27 @@
 
         return deviceId;
     }
+
+    // Pre-fill server address on first launch so user doesn't have to type it
+    (function preFillServer() {
+        var SERVER_URL = 'https://movies.great-tags.com';
+        var creds = localStorage.getItem('jellyfin_credentials');
+        if (!creds) {
+            var id = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/x/g, function () {
+                return (Math.random() * 16 | 0).toString(16);
+            });
+            localStorage.setItem('jellyfin_credentials', JSON.stringify({
+                Servers: [{
+                    Id: id,
+                    ManualAddress: SERVER_URL,
+                    LastConnectionMode: 2,
+                    manualAddressOnly: true,
+                    DateLastAccessed: Date.now()
+                }]
+            }));
+            postMessage('serverPreFill', 'pre-filled server: ' + SERVER_URL);
+        }
+    })();
 
     var AppInfo = {
         deviceId: getDeviceId(),
