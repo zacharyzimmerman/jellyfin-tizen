@@ -668,48 +668,71 @@
         return deviceId;
     }
 
-    // Ensure server address is pre-filled so user doesn't have to type it
-    (function preFillServer() {
-        var SERVER_URL = 'https://movies.great-tags.com';
-        var SERVER_NAME = 'Jellyfin';
+    // Ensure server address is pre-filled and auto-authenticate test account
+    var SERVER_URL = 'https://movies.great-tags.com';
+    var SERVER_NAME = 'Jellyfin';
+    var AUTO_USER = 'claude';
+    var AUTO_PASS = 'claude';
+
+    (function preFillAndAuth() {
         var creds = localStorage.getItem('jellyfin_credentials');
         var data = null;
         try { data = creds ? JSON.parse(creds) : null; } catch (e) { /* ignore */ }
+        if (!data) data = { Servers: [] };
+        if (!data.Servers) data.Servers = [];
 
-        // Check if our server already exists with proper fields
-        var dominated = false;
-        if (data && data.Servers) {
-            for (var i = 0; i < data.Servers.length; i++) {
-                if (data.Servers[i].ManualAddress === SERVER_URL) {
-                    // Fix missing Name on existing entry
-                    if (!data.Servers[i].Name) {
-                        data.Servers[i].Name = SERVER_NAME;
-                        localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
-                        postMessage('serverPreFill', 'patched Name on existing server entry');
-                    }
-                    dominated = true;
-                    break;
-                }
+        // Find or create our server entry
+        var entry = null;
+        for (var i = 0; i < data.Servers.length; i++) {
+            if (data.Servers[i].ManualAddress === SERVER_URL) {
+                entry = data.Servers[i];
+                break;
             }
         }
-
-        if (!dominated) {
-            var id = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/x/g, function () {
-                return (Math.random() * 16 | 0).toString(16);
-            });
-            var entry = {
-                Id: id,
-                Name: SERVER_NAME,
+        if (!entry) {
+            entry = {
+                Id: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/x/g, function () {
+                    return (Math.random() * 16 | 0).toString(16);
+                }),
                 ManualAddress: SERVER_URL,
                 LastConnectionMode: 2,
-                manualAddressOnly: true,
-                DateLastAccessed: Date.now()
+                manualAddressOnly: true
             };
-            if (!data) data = { Servers: [] };
-            if (!data.Servers) data.Servers = [];
             data.Servers.unshift(entry);
+        }
+        entry.Name = SERVER_NAME;
+        entry.DateLastAccessed = Date.now();
+
+        // If already authenticated (has AccessToken + UserId), just save and skip
+        if (entry.AccessToken && entry.UserId) {
             localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
-            postMessage('serverPreFill', 'added server: ' + SERVER_URL);
+            postMessage('serverPreFill', 'already authenticated');
+            return;
+        }
+
+        // Auto-authenticate via Jellyfin API
+        postMessage('serverPreFill', 'auto-authenticating as ' + AUTO_USER);
+        var deviceId = getDeviceId();
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', SERVER_URL + '/Users/AuthenticateByName', false); // synchronous
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('X-Emby-Authorization',
+            'MediaBrowser Client="Jellyfin for Tizen", Device="Samsung Smart TV", DeviceId="' + deviceId + '", Version="0.10.0"');
+        try {
+            xhr.send(JSON.stringify({ Username: AUTO_USER, Pw: AUTO_PASS }));
+            if (xhr.status === 200) {
+                var resp = JSON.parse(xhr.responseText);
+                entry.AccessToken = resp.AccessToken;
+                entry.UserId = resp.User.Id;
+                localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
+                postMessage('serverPreFill', 'authenticated OK — token stored');
+            } else {
+                postMessage('serverPreFill', 'auth failed: HTTP ' + xhr.status);
+                localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
+            }
+        } catch (e) {
+            postMessage('serverPreFill', 'auth error: ' + e.message);
+            localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
         }
     })();
 
