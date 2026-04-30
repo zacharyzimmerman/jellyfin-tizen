@@ -38,7 +38,7 @@ const original = src;
 // Find: elem = document.createElement('audio');
 // Replace with: elem = document.createElement(browser.tizen ? 'video' : 'audio');
 const createAudioOld = "elem = document.createElement('audio');";
-const createAudioNew = "elem = document.createElement(browser.tizen ? 'video' : 'audio');";
+const createAudioNew = "console.debug('[TIZEN-MSE] createMediaElement: browser.tizen=' + !!browser.tizen); elem = document.createElement(browser.tizen ? 'video' : 'audio'); console.debug('[TIZEN-MSE] created <' + elem.nodeName + '>');";
 
 if (!src.includes(createAudioOld)) {
     console.error('ERROR: Cannot find createElement(\'audio\') in createMediaElement');
@@ -331,10 +331,14 @@ const nativePathOld = `return htmlMediaHelper.applySrc(elem, val, options).then(
                 });`;
 
 const nativePathNew = `// TIZEN MSE PATCH: Use MSE pipeline on Tizen for audio-through-video
+                console.debug('[TIZEN-MSE] native path: browser.tizen=' + !!browser.tizen + ' JMuxer=' + (typeof window.JMuxer) + ' MediaSource=' + (typeof MediaSource) + ' isAudio=' + /\\/Audio\\//i.test(val));
+                console.debug('[TIZEN-MSE] elem type=' + elem.nodeName + ' url=' + (val || '').substring(0, 100));
                 if (browser.tizen && typeof window.JMuxer !== 'undefined' && typeof MediaSource !== 'undefined' && /\\/Audio\\//i.test(val)) {
+                    console.debug('[TIZEN-MSE] => using MSE pipeline');
                     self._currentSrc = val;
                     return tizenMsePlay(elem, val, onError);
                 }
+                console.debug('[TIZEN-MSE] => using native path (fallback)');
                 return htmlMediaHelper.applySrc(elem, val, options).then(function () {
                     self._currentSrc = val;
 

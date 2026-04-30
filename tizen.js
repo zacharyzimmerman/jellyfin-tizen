@@ -24,7 +24,28 @@
         _debugOverlay.textContent = _debugLines.join('\n');
     }
 
-    // Screensaver bypass strategy (Build 36):
+    // Expose debugLog globally so the patched webpack bundle can use it
+    window.__tizenDebug = debugLog;
+
+    // Intercept console.debug and console.error to capture [TIZEN-MSE] messages in overlay
+    var _origDebug = console.debug;
+    console.debug = function() {
+        _origDebug.apply(console, arguments);
+        var msg = Array.prototype.slice.call(arguments).join(' ');
+        if (msg.indexOf('[TIZEN-MSE]') !== -1) {
+            debugLog(msg);
+        }
+    };
+    var _origError = console.error;
+    console.error = function() {
+        _origError.apply(console, arguments);
+        var msg = Array.prototype.slice.call(arguments).join(' ');
+        if (msg.indexOf('[TIZEN-MSE]') !== -1 || msg.indexOf('MEDIA_ELEMENT') !== -1 || msg.indexOf('media element error') !== -1) {
+            debugLog('ERR: ' + msg);
+        }
+    };
+
+    // Screensaver bypass strategy (Build 36/37):
     //
     // The jellyfin-web htmlAudioPlayer plugin has been PATCHED at build time
     // (patches/apply-tizen-video-patch.cjs) to:

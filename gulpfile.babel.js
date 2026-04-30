@@ -68,7 +68,7 @@ function modifyIndex() {
             // inject CSP meta tag
             const meta = this.createElement('meta');
             meta.setAttribute('http-equiv', 'Content-Security-Policy');
-            meta.setAttribute('content', 'default-src * \'self\' \'unsafe-inline\' \'unsafe-eval\' data: gap: file: filesystem: ws: wss:;');
+            meta.setAttribute('content', 'default-src * \'self\' \'unsafe-inline\' \'unsafe-eval\' data: blob: gap: file: filesystem: ws: wss:;');
             this.head.appendChild(meta);
 
             // Search for injected main.bundle
