@@ -144,11 +144,10 @@ function rewriteAudioUrlForAAC(url) {
 }
 
 // Set up jMuxer MSE pipeline for audio-through-video playback on Tizen
-// Build 38: Redesigned feeding strategy:
-//   - Feed ALL audio in large ~2s chunks (not 4 frames at a time)
-//   - Feed video at 15fps in a continuous loop (keeps HW decoder active)
-//   - Separate video feed loop continues even after all audio is queued
-//   - Periodic screensaver suppression via global callback
+// Build 39: Single combined feed loop — audio+video in same feed() call.
+//   jMuxer mode:'both' requires audio and video together to mux correctly.
+//   Feed at 15fps (67ms), ~3 audio frames per tick to match real-time.
+//   Periodic screensaver suppression via global callback.
 function tizenMsePlay(videoElem, audioUrl, onErrorFn) {
     console.debug('[TIZEN-MSE] starting MSE pipeline for: ' + audioUrl.substring(0, 80));
 
@@ -170,27 +169,24 @@ function tizenMsePlay(videoElem, audioUrl, onErrorFn) {
 
         let resolved = false;
         let jmuxerInstance = null;
-        let videoFeedInterval = null;   // 15fps video keyframe feed
-        let audioFeedInterval = null;   // Audio chunk feed
+        let feedInterval = null;        // Combined audio+video feed at 15fps
         let screenSaverInterval = null; // Periodic screensaver suppression
         let audioFrames = null;
         let audioFrameIndex = 0;
-        let playbackStarted = false;
-        // Feed ~2 seconds of audio per tick (~86 frames at 44.1kHz AAC)
-        const AUDIO_FRAMES_PER_CHUNK = 86;
-        const VIDEO_FEED_MS = 67;  // ~15fps
+        // At 15fps (67ms per tick), need ~3 AAC frames per tick
+        // (AAC frame = 1024/44100 ≈ 23.2ms, so 3 frames ≈ 69.6ms)
+        const AUDIO_FRAMES_PER_TICK = 3;
+        const FEED_INTERVAL_MS = 67;  // ~15fps
 
         // Store cleanup function on the element for destroy()
         videoElem._tizenMseCleanup = function () {
             console.debug('[TIZEN-MSE] cleanup');
-            if (videoFeedInterval) { clearInterval(videoFeedInterval); videoFeedInterval = null; }
-            if (audioFeedInterval) { clearInterval(audioFeedInterval); audioFeedInterval = null; }
+            if (feedInterval) { clearInterval(feedInterval); feedInterval = null; }
             if (screenSaverInterval) { clearInterval(screenSaverInterval); screenSaverInterval = null; }
             if (jmuxerInstance) {
                 try { jmuxerInstance.destroy(); } catch (e) { /* ignore */ }
                 jmuxerInstance = null;
             }
-            playbackStarted = false;
             // Notify tizen.js to restore screensaver
             if (window.__tizenRestoreScreenSaver) window.__tizenRestoreScreenSaver();
             videoElem._tizenMseCleanup = null;
@@ -202,21 +198,12 @@ function tizenMsePlay(videoElem, audioUrl, onErrorFn) {
                 node: videoElem,
                 mode: 'both',
                 fps: 15,
-                flushingTime: 0,
-                maxDelay: 2000,
-                clearBuffer: true,
+                flushingTime: 100,
+                maxDelay: 500,
+                clearBuffer: false,
                 debug: false,
                 onReady: function () {
                     console.debug('[TIZEN-MSE] jMuxer ready (fps=15)');
-
-                    // Start continuous video keyframe feed at 15fps immediately
-                    // This keeps the HW video decoder active to suppress OLED screensaver
-                    videoFeedInterval = setInterval(() => {
-                        if (!jmuxerInstance) return;
-                        try {
-                            jmuxerInstance.feed({ video: keyframe });
-                        } catch (e) { /* ignore */ }
-                    }, VIDEO_FEED_MS);
 
                     // Start periodic screensaver suppression (every 30s)
                     if (window.__tizenSuppressScreenSaver) {
@@ -226,7 +213,17 @@ function tizenMsePlay(videoElem, audioUrl, onErrorFn) {
                         }, 30000);
                     }
 
-                    // Fetch the entire audio file, then feed in large chunks
+                    // Feed initial video keyframe with H.264 stream data
+                    try {
+                        const h264Binary = atob(TIZEN_H264_BASE64);
+                        const h264Data = new Uint8Array(h264Binary.length);
+                        for (let i = 0; i < h264Binary.length; i++) h264Data[i] = h264Binary.charCodeAt(i);
+                        jmuxerInstance.feed({ video: h264Data, duration: 67 });
+                    } catch (e) {
+                        console.error('[TIZEN-MSE] initial video feed error', e);
+                    }
+
+                    // Fetch the audio file
                     console.debug('[TIZEN-MSE] fetching audio from: ' + aacUrl.substring(0, 80));
                     fetch(aacUrl, { credentials: 'same-origin' })
                         .then(response => {
@@ -244,49 +241,45 @@ function tizenMsePlay(videoElem, audioUrl, onErrorFn) {
                                 return;
                             }
 
-                            // Helper: feed a chunk of audio frames
-                            function feedAudioChunk() {
-                                if (!jmuxerInstance || audioFrameIndex >= audioFrames.length) {
-                                    if (audioFeedInterval) { clearInterval(audioFeedInterval); audioFeedInterval = null; }
-                                    console.debug('[TIZEN-MSE] all audio fed (' + audioFrameIndex + ' frames)');
+                            // Combined feed loop: audio + video together in each feed() call
+                            // This is critical — jMuxer mode:'both' needs them together to mux
+                            feedInterval = setInterval(() => {
+                                if (!jmuxerInstance) {
+                                    if (feedInterval) { clearInterval(feedInterval); feedInterval = null; }
                                     return;
                                 }
-                                const batch = [];
-                                const end = Math.min(audioFrameIndex + AUDIO_FRAMES_PER_CHUNK, audioFrames.length);
-                                for (let i = audioFrameIndex; i < end; i++) {
-                                    batch.push(audioFrames[i]);
+
+                                // Build audio payload for this tick
+                                const feedData = { video: keyframe, duration: FEED_INTERVAL_MS };
+
+                                if (audioFrames && audioFrameIndex < audioFrames.length) {
+                                    const batch = [];
+                                    for (let i = 0; i < AUDIO_FRAMES_PER_TICK && audioFrameIndex < audioFrames.length; i++) {
+                                        batch.push(audioFrames[audioFrameIndex++]);
+                                    }
+                                    if (batch.length > 0) {
+                                        const totalLen = batch.reduce((s, f) => s + f.length, 0);
+                                        const combined = new Uint8Array(totalLen);
+                                        let offset = 0;
+                                        for (const frame of batch) {
+                                            combined.set(frame, offset);
+                                            offset += frame.length;
+                                        }
+                                        feedData.audio = combined;
+                                    }
                                 }
-                                audioFrameIndex = end;
-                                const totalLen = batch.reduce((s, f) => s + f.length, 0);
-                                const combined = new Uint8Array(totalLen);
-                                let offset = 0;
-                                for (const frame of batch) {
-                                    combined.set(frame, offset);
-                                    offset += frame.length;
-                                }
+
                                 try {
-                                    jmuxerInstance.feed({ audio: combined });
+                                    jmuxerInstance.feed(feedData);
                                 } catch (e) {
-                                    console.error('[TIZEN-MSE] audio feed error', e);
+                                    console.error('[TIZEN-MSE] feed error', e);
                                 }
-                            }
-
-                            // Feed first ~6 seconds of audio upfront (3 chunks)
-                            feedAudioChunk();
-                            feedAudioChunk();
-                            feedAudioChunk();
-                            console.debug('[TIZEN-MSE] initial audio buffer: ' + audioFrameIndex + '/' + audioFrames.length + ' frames');
-
-                            // Continue feeding remaining audio every 1.5 seconds
-                            if (audioFrameIndex < audioFrames.length) {
-                                audioFeedInterval = setInterval(feedAudioChunk, 1500);
-                            }
+                            }, FEED_INTERVAL_MS);
 
                             // Start playback
                             const tryPlay = () => {
                                 videoElem.play().then(() => {
                                     console.debug('[TIZEN-MSE] playing');
-                                    playbackStarted = true;
                                     if (!resolved) { resolved = true; resolve(); }
                                 }).catch(e => {
                                     console.debug('[TIZEN-MSE] play() retry: ' + e.message);
@@ -294,7 +287,6 @@ function tizenMsePlay(videoElem, audioUrl, onErrorFn) {
                                         videoElem.removeEventListener('canplay', onCanPlay);
                                         videoElem.play().then(() => {
                                             console.debug('[TIZEN-MSE] playing after canplay');
-                                            playbackStarted = true;
                                             if (!resolved) { resolved = true; resolve(); }
                                         }).catch(e2 => {
                                             console.error('[TIZEN-MSE] play failed', e2);
@@ -303,7 +295,7 @@ function tizenMsePlay(videoElem, audioUrl, onErrorFn) {
                                     });
                                 });
                             };
-                            setTimeout(tryPlay, 300);
+                            setTimeout(tryPlay, 200);
                         })
                         .catch(err => {
                             console.error('[TIZEN-MSE] fetch error', err);

@@ -151,18 +151,28 @@
 
         localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
 
-        // Also write to the server input field if on the login/connect page
-        // The jellyfin-web connect page has an input with id 'txtServerAddress'
-        setTimeout(function () {
-            var input = document.querySelector('#txtServerAddress');
+        // Also write to the server input field if on the add-server page
+        // jellyfin-web 10.10.x uses #txtServerHost (legacy HTML controller)
+        // Check periodically in case the page hasn't rendered yet
+        var prefillAttempts = 0;
+        var prefillTimer = setInterval(function () {
+            prefillAttempts++;
+            var input = document.querySelector('#txtServerHost');
             if (input && !input.value) {
                 input.value = SERVER_URL;
-                // Trigger input event so React/jellyfin-web picks up the value
+                // Trigger input event so the form validation picks up the value
                 var evt = new Event('input', { bubbles: true });
                 input.dispatchEvent(evt);
-                debugLog('[PREFILL] auto-filled server address input');
+                debugLog('[PREFILL] auto-filled #txtServerHost');
+                clearInterval(prefillTimer);
+            } else if (input && input.value) {
+                // Already has a value, stop trying
+                clearInterval(prefillTimer);
+            } else if (prefillAttempts >= 10) {
+                // Give up after ~5 seconds
+                clearInterval(prefillTimer);
             }
-        }, 2000);
+        }, 500);
 
         debugLog('[PREFILL] server entry saved: ' + SERVER_URL);
     })();
