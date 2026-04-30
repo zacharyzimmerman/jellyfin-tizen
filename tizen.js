@@ -45,19 +45,20 @@
         }
     };
 
-    // Screensaver bypass strategy (Build 36/37):
+    // Screensaver bypass strategy (Build 38):
     //
     // The jellyfin-web htmlAudioPlayer plugin has been PATCHED at build time
     // (patches/apply-tizen-video-patch.cjs) to:
     //   1. Create <video> instead of <audio> on Tizen (browser.tizen detection)
-    //   2. Route audio URLs through jMuxer MSE (H.264 + AAC) so the hardware
-    //      video decoder is active during audio playback
+    //   2. Route audio URLs through jMuxer MSE (H.264 @ 15fps + AAC) so the
+    //      hardware video decoder is continuously active during audio playback
     //   3. Clean up jMuxer on destroy()/stop()
     //
-    // tizen.js no longer needs to intercept or proxy anything. It just provides:
+    // tizen.js provides:
     //   - NativeShell/AppHost adapter (required by jellyfin-web)
     //   - Server pre-fill for https://movies.great-tags.com
-    //   - Belt-and-suspenders screensaver API calls (AppCommon + Power API)
+    //   - Screensaver API calls (AppCommon + Power API) — both event-driven
+    //     AND periodic (every 30s via global hooks called by the MSE patch)
     //   - Debug overlay for on-TV diagnostics
     //   - jMuxer availability check (loaded via <script> tag in index.html)
 
@@ -110,7 +111,7 @@
         return deviceId;
     }
 
-    // Ensure server address is pre-filled
+    // Ensure server address is pre-filled so the user doesn't have to type it
     var SERVER_URL = 'https://movies.great-tags.com';
     var SERVER_NAME = 'Jellyfin';
 
@@ -123,7 +124,8 @@
 
         var entry = null;
         for (var i = 0; i < data.Servers.length; i++) {
-            if (data.Servers[i].ManualAddress === SERVER_URL) {
+            if (data.Servers[i].ManualAddress === SERVER_URL ||
+                data.Servers[i].LocalAddress === SERVER_URL) {
                 entry = data.Servers[i];
                 break;
             }
@@ -134,16 +136,35 @@
                     return (Math.random() * 16 | 0).toString(16);
                 }),
                 ManualAddress: SERVER_URL,
+                LocalAddress: SERVER_URL,
                 LastConnectionMode: 2,
                 manualAddressOnly: true
             };
             data.Servers.unshift(entry);
         }
+        // Always update these fields to keep the entry fresh
         entry.Name = SERVER_NAME;
+        entry.ManualAddress = SERVER_URL;
+        entry.LocalAddress = SERVER_URL;
         entry.DateLastAccessed = Date.now();
+        entry.LastConnectionMode = 2;
 
         localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
-        postMessage('serverPreFill', 'server entry saved (manual login)');
+
+        // Also write to the server input field if on the login/connect page
+        // The jellyfin-web connect page has an input with id 'txtServerAddress'
+        setTimeout(function () {
+            var input = document.querySelector('#txtServerAddress');
+            if (input && !input.value) {
+                input.value = SERVER_URL;
+                // Trigger input event so React/jellyfin-web picks up the value
+                var evt = new Event('input', { bubbles: true });
+                input.dispatchEvent(evt);
+                debugLog('[PREFILL] auto-filled server address input');
+            }
+        }, 2000);
+
+        debugLog('[PREFILL] server entry saved: ' + SERVER_URL);
     })();
 
     var AppInfo = {
@@ -337,13 +358,14 @@
         }
     };
 
-    // Belt-and-suspenders: also use Power API during media playback
+    // Screensaver suppression using both AppCommon and Power API
+    // Called on media events AND periodically (every 30s) by the MSE patch
     function suppressScreenSaver() {
         try {
             webapis.appcommon.setScreenSaver(
                 webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
-                function () { postMessage('setScreenSaver', { state: 'OFF' }); },
-                function (err) { postMessage('setScreenSaver', { state: 'OFF', error: JSON.stringify(err) }); }
+                function () { /* quiet — logged only on first call per session */ },
+                function (err) { debugLog('setScreenSaver OFF err: ' + JSON.stringify(err)); }
             );
         } catch (e) { /* ignore */ }
 
@@ -356,8 +378,8 @@
         try {
             webapis.appcommon.setScreenSaver(
                 webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
-                function () { postMessage('setScreenSaver', { state: 'ON' }); },
-                function (err) { postMessage('setScreenSaver', { state: 'ON', error: JSON.stringify(err) }); }
+                function () { /* quiet */ },
+                function (err) { debugLog('setScreenSaver ON err: ' + JSON.stringify(err)); }
             );
         } catch (e) { /* ignore */ }
 
@@ -365,6 +387,10 @@
             tizen.power.release('SCREEN');
         } catch (e) { /* ignore */ }
     }
+
+    // Expose globally so the MSE patch (inside webpack bundle) can call them
+    window.__tizenSuppressScreenSaver = suppressScreenSaver;
+    window.__tizenRestoreScreenSaver = restoreScreenSaver;
 
     function attachMediaListeners(el) {
         if (el._tizenListenersAttached) return;
