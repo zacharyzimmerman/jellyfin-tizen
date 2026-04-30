@@ -24,15 +24,15 @@
         _debugOverlay.textContent = _debugLines.join('\n');
     }
 
-    // Expose debugLog globally so the patched webpack bundle can use it
+    // Expose debugLog globally
     window.__tizenDebug = debugLog;
 
-    // Intercept console.debug and console.error to capture [TIZEN-MSE] messages in overlay
+    // Intercept console.debug and console.error to capture diagnostics in overlay
     var _origDebug = console.debug;
     console.debug = function() {
         _origDebug.apply(console, arguments);
         var msg = Array.prototype.slice.call(arguments).join(' ');
-        if (msg.indexOf('[TIZEN-MSE]') !== -1) {
+        if (msg.indexOf('[TIZEN') !== -1) {
             debugLog(msg);
         }
     };
@@ -40,50 +40,10 @@
     console.error = function() {
         _origError.apply(console, arguments);
         var msg = Array.prototype.slice.call(arguments).join(' ');
-        if (msg.indexOf('[TIZEN-MSE]') !== -1 || msg.indexOf('MEDIA_ELEMENT') !== -1 || msg.indexOf('media element error') !== -1) {
+        if (msg.indexOf('[TIZEN') !== -1 || msg.indexOf('MEDIA_ELEMENT') !== -1 || msg.indexOf('media element error') !== -1) {
             debugLog('ERR: ' + msg);
         }
     };
-
-    // Screensaver bypass strategy (Build 38):
-    //
-    // The jellyfin-web htmlAudioPlayer plugin has been PATCHED at build time
-    // (patches/apply-tizen-video-patch.cjs) to:
-    //   1. Create <video> instead of <audio> on Tizen (browser.tizen detection)
-    //   2. Route audio URLs through jMuxer MSE (H.264 @ 15fps + AAC) so the
-    //      hardware video decoder is continuously active during audio playback
-    //   3. Clean up jMuxer on destroy()/stop()
-    //
-    // tizen.js provides:
-    //   - NativeShell/AppHost adapter (required by jellyfin-web)
-    //   - Server pre-fill for https://movies.great-tags.com
-    //   - Screensaver API calls (AppCommon + Power API) — both event-driven
-    //     AND periodic (every 30s via global hooks called by the MSE patch)
-    //   - Debug overlay for on-TV diagnostics
-    //   - jMuxer availability check (loaded via <script> tag in index.html)
-
-    // Verify jMuxer is loaded (injected by gulpfile into index.html)
-    if (typeof JMuxer !== 'undefined') {
-        debugLog('[INIT] JMuxer loaded: v' + (JMuxer.version || 'unknown'));
-    } else {
-        debugLog('[INIT] WARNING: JMuxer not loaded — MSE patch will fall back to native audio');
-    }
-
-    // MSE codec diagnostics
-    (function diagnoseMSE() {
-        var codecs = [
-            'video/mp4; codecs="avc1.42c00d"',
-            'video/mp4; codecs="avc1.42c00d,mp4a.40.2"',
-            'audio/mp4; codecs="mp4a.40.2"'
-        ];
-        var hasMS = typeof MediaSource !== 'undefined';
-        debugLog('[DIAG] MediaSource: ' + hasMS);
-        if (hasMS) {
-            codecs.forEach(function (c) {
-                debugLog('[DIAG] ' + c + ': ' + MediaSource.isTypeSupported(c));
-            });
-        }
-    })();
 
     function postMessage() {
         console.log.apply(console, arguments);
@@ -92,6 +52,136 @@
             parts.push(typeof arguments[a] === 'object' ? JSON.stringify(arguments[a]) : String(arguments[a]));
         }
         debugLog(parts.join(' '));
+    }
+
+    // ============================================================
+    // OLED Screensaver Bypass
+    // ============================================================
+    //
+    // Samsung OLED TVs have firmware-level burn-in protection that
+    // activates after ~2 minutes of static pixels, regardless of
+    // what apps request via setScreenSaver API. The only reliable
+    // way to prevent it is to have CHANGING PIXELS on the display.
+    //
+    // Strategy: When audio playback starts, show a fullscreen
+    // <video> element behind the Jellyfin UI that loops a subtle
+    // dark animation (screensaver-bypass.mp4). The video content
+    // produces barely-visible pixel changes that tell the firmware
+    // real video is playing. Combined with setScreenSaver(OFF) and
+    // tizen.power.request() for belt-and-suspenders coverage.
+    //
+    // screensaver-bypass.mp4 specs:
+    //   128x72, H.264 Baseline, 2fps, 60s loop, ~25KB
+    //   Dark sine-wave pattern (luma 16-45, barely visible on OLED)
+
+    var _bypassVideo = null;
+    var _bypassActive = false;
+    var _screenSaverInterval = null;
+
+    function createBypassVideo() {
+        if (_bypassVideo) return _bypassVideo;
+
+        var v = document.createElement('video');
+        v.id = 'tizen-screensaver-bypass';
+        v.setAttribute('playsinline', '');
+        v.setAttribute('muted', '');
+        v.muted = true;
+        v.loop = true;
+        v.volume = 0;
+        // Position behind all UI content — Jellyfin UI has z-index layers
+        // but this sits at the very back
+        v.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;' +
+            'z-index:-1;object-fit:cover;pointer-events:none;opacity:1;';
+        v.src = '../screensaver-bypass.mp4';
+
+        // Preload so it's ready when needed
+        v.preload = 'auto';
+        v.load();
+
+        (document.body || document.documentElement).appendChild(v);
+        _bypassVideo = v;
+
+        debugLog('[BYPASS] created bypass video element');
+        return v;
+    }
+
+    function startBypass() {
+        if (_bypassActive) return;
+        _bypassActive = true;
+
+        var v = createBypassVideo();
+        v.style.display = 'block';
+
+        var playPromise = v.play();
+        if (playPromise && playPromise.catch) {
+            playPromise.then(function () {
+                debugLog('[BYPASS] video playing');
+            }).catch(function (e) {
+                debugLog('[BYPASS] play failed: ' + e.message);
+            });
+        }
+
+        // Also suppress via API (belt and suspenders)
+        suppressScreenSaver();
+
+        // Periodic API suppression every 30s
+        if (!_screenSaverInterval) {
+            _screenSaverInterval = setInterval(function () {
+                if (_bypassActive) suppressScreenSaver();
+            }, 30000);
+        }
+
+        debugLog('[BYPASS] started');
+    }
+
+    function stopBypass() {
+        if (!_bypassActive) return;
+        _bypassActive = false;
+
+        if (_bypassVideo) {
+            _bypassVideo.pause();
+            _bypassVideo.style.display = 'none';
+        }
+
+        if (_screenSaverInterval) {
+            clearInterval(_screenSaverInterval);
+            _screenSaverInterval = null;
+        }
+
+        restoreScreenSaver();
+        debugLog('[BYPASS] stopped');
+    }
+
+    // ============================================================
+    // Screensaver API calls (secondary defense)
+    // ============================================================
+
+    function suppressScreenSaver() {
+        try {
+            webapis.appcommon.setScreenSaver(
+                webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
+                function () { /* quiet */ },
+                function (err) { debugLog('setScreenSaver OFF err: ' + JSON.stringify(err)); }
+            );
+        } catch (e) { /* ignore */ }
+
+        try {
+            tizen.power.request('SCREEN', 'SCREEN_NORMAL');
+        } catch (e) { /* ignore */ }
+    }
+
+    function restoreScreenSaver() {
+        try {
+            webapis.appcommon.setScreenSaver(
+                webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
+                function () { /* quiet */ },
+                function (err) { debugLog('setScreenSaver ON err: ' + JSON.stringify(err)); }
+            );
+        } catch (e) { /* ignore */ }
+
+        try {
+            tizen.power.release('SCREEN');
+        } catch (e) { /* ignore */ }
     }
 
     // ============================================================
@@ -152,24 +242,20 @@
         localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
 
         // Also write to the server input field if on the add-server page
-        // jellyfin-web 10.10.x uses #txtServerHost (legacy HTML controller)
-        // Check periodically in case the page hasn't rendered yet
+        // jellyfin-web 10.10.x uses #txtServerHost
         var prefillAttempts = 0;
         var prefillTimer = setInterval(function () {
             prefillAttempts++;
             var input = document.querySelector('#txtServerHost');
             if (input && !input.value) {
                 input.value = SERVER_URL;
-                // Trigger input event so the form validation picks up the value
                 var evt = new Event('input', { bubbles: true });
                 input.dispatchEvent(evt);
                 debugLog('[PREFILL] auto-filled #txtServerHost');
                 clearInterval(prefillTimer);
             } else if (input && input.value) {
-                // Already has a value, stop trying
                 clearInterval(prefillTimer);
             } else if (prefillAttempts >= 10) {
-                // Give up after ~5 seconds
                 clearInterval(prefillTimer);
             }
         }, 500);
@@ -262,16 +348,7 @@
 
             exit: function () {
                 postMessage('AppHost.exit');
-
-                try {
-                    webapis.appcommon.setScreenSaver(
-                        webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON
-                    );
-                } catch (e) { /* ignore */ }
-                try {
-                    tizen.power.release('SCREEN');
-                } catch (e) { /* ignore */ }
-
+                stopBypass();
                 tizen.application.getCurrentApplication().exit();
             },
 
@@ -333,111 +410,86 @@
 
         updateMediaSession: function (mediaInfo) {
             postMessage('updateMediaSession', { mediaInfo: mediaInfo });
-
-            try {
-                webapis.appcommon.setScreenSaver(
-                    webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
-                    function (result) {
-                        postMessage('setScreenSaver', { state: 'OFF', result: result });
-                    },
-                    function (error) {
-                        postMessage('setScreenSaver', { state: 'OFF', error: JSON.stringify(error) });
-                    }
-                );
-            } catch (e) {
-                postMessage('setScreenSaver', { error: e.message });
-            }
+            suppressScreenSaver();
         },
 
         hideMediaSession: function () {
             postMessage('hideMediaSession');
-
-            try {
-                webapis.appcommon.setScreenSaver(
-                    webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
-                    function (result) {
-                        postMessage('setScreenSaver', { state: 'ON', result: result });
-                    },
-                    function (error) {
-                        postMessage('setScreenSaver', { state: 'ON', error: JSON.stringify(error) });
-                    }
-                );
-            } catch (e) {
-                postMessage('setScreenSaver', { error: e.message });
-            }
+            restoreScreenSaver();
         }
     };
 
-    // Screensaver suppression using both AppCommon and Power API
-    // Called on media events AND periodically (every 30s) by the MSE patch
-    function suppressScreenSaver() {
-        try {
-            webapis.appcommon.setScreenSaver(
-                webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
-                function () { /* quiet — logged only on first call per session */ },
-                function (err) { debugLog('setScreenSaver OFF err: ' + JSON.stringify(err)); }
-            );
-        } catch (e) { /* ignore */ }
+    // ============================================================
+    // Media element listeners — start/stop bypass video on audio
+    // ============================================================
 
-        try {
-            tizen.power.request('SCREEN', 'SCREEN_NORMAL');
-        } catch (e) { /* ignore */ }
+    function isAudioElement(el) {
+        return el.nodeName === 'AUDIO' ||
+            (el.nodeName === 'VIDEO' && el.classList.contains('mediaPlayerAudio'));
     }
 
-    function restoreScreenSaver() {
-        try {
-            webapis.appcommon.setScreenSaver(
-                webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
-                function () { /* quiet */ },
-                function (err) { debugLog('setScreenSaver ON err: ' + JSON.stringify(err)); }
-            );
-        } catch (e) { /* ignore */ }
-
-        try {
-            tizen.power.release('SCREEN');
-        } catch (e) { /* ignore */ }
+    function isVideoPlayback(el) {
+        // Real video playback (movies, shows) — not our bypass video
+        return el.nodeName === 'VIDEO' &&
+            !el.classList.contains('mediaPlayerAudio') &&
+            el.id !== 'tizen-screensaver-bypass';
     }
-
-    // Expose globally so the MSE patch (inside webpack bundle) can call them
-    window.__tizenSuppressScreenSaver = suppressScreenSaver;
-    window.__tizenRestoreScreenSaver = restoreScreenSaver;
 
     function attachMediaListeners(el) {
         if (el._tizenListenersAttached) return;
+        if (el.id === 'tizen-screensaver-bypass') return; // Skip our own bypass video
         el._tizenListenersAttached = true;
 
         var tag = el.nodeName;
-        debugLog('[MEDIA] attaching listeners to <' + tag + '>');
+        var classes = el.className || '';
+        debugLog('[MEDIA] attaching to <' + tag + '> class="' + classes + '"');
 
-        // Standard screensaver API calls
         el.addEventListener('playing', function () {
-            debugLog('[MEDIA] <' + tag + '> playing — src=' + (el.src || '').substring(0, 60));
-            suppressScreenSaver();
+            var src = (el.src || el.currentSrc || '').substring(0, 80);
+            debugLog('[MEDIA] <' + tag + '> playing — ' + src);
+
+            if (isAudioElement(el)) {
+                // Audio playback — start bypass video for OLED
+                debugLog('[MEDIA] audio detected, starting bypass');
+                startBypass();
+            } else if (isVideoPlayback(el)) {
+                // Real video — just suppress screensaver via API
+                suppressScreenSaver();
+            }
         });
+
         el.addEventListener('pause', function () {
             debugLog('[MEDIA] <' + tag + '> paused');
-            restoreScreenSaver();
-        });
-        el.addEventListener('ended', function () {
-            debugLog('[MEDIA] <' + tag + '> ended');
-            restoreScreenSaver();
-        });
-        el.addEventListener('emptied', function () {
-            debugLog('[MEDIA] <' + tag + '> emptied');
-            restoreScreenSaver();
+            if (isAudioElement(el)) {
+                stopBypass();
+            } else if (isVideoPlayback(el)) {
+                restoreScreenSaver();
+            }
         });
 
-        // Log MSE-related events for diagnostics
+        el.addEventListener('ended', function () {
+            debugLog('[MEDIA] <' + tag + '> ended');
+            if (isAudioElement(el)) {
+                stopBypass();
+            } else if (isVideoPlayback(el)) {
+                restoreScreenSaver();
+            }
+        });
+
+        el.addEventListener('emptied', function () {
+            debugLog('[MEDIA] <' + tag + '> emptied');
+            if (isAudioElement(el)) {
+                stopBypass();
+            } else if (isVideoPlayback(el)) {
+                restoreScreenSaver();
+            }
+        });
+
+        // Diagnostics
         el.addEventListener('error', function () {
             var code = el.error ? el.error.code : 0;
             var msg = el.error ? el.error.message : '';
             debugLog('[MEDIA] <' + tag + '> error: ' + code + ' ' + msg);
-        });
-        el.addEventListener('canplay', function () {
-            debugLog('[MEDIA] <' + tag + '> canplay');
-        });
-        el.addEventListener('loadeddata', function () {
-            debugLog('[MEDIA] <' + tag + '> loadeddata');
         });
     }
 
@@ -466,6 +518,10 @@
 
         document.querySelectorAll('audio, video').forEach(attachMediaListeners);
         observer.observe(document.body, { childList: true, subtree: true });
+
+        // Pre-create the bypass video element (preloads the mp4)
+        createBypassVideo();
+        debugLog('[INIT] bypass video preloaded');
     });
 
     function updateKeys() {

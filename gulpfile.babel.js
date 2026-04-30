@@ -107,11 +107,6 @@ function modifyIndex() {
             appMode.text = 'window.appMode=\'cordova\';';
             injectTarget.insertBefore(appMode, apploader);
 
-            // inject jmuxer (required by tizen.js for screensaver bypass)
-            const jmuxerScript = this.createElement('script');
-            jmuxerScript.setAttribute('src', '../jmuxer.min.js');
-            injectTarget.insertBefore(jmuxerScript, apploader);
-
             // inject tizen.js
             const tizen = this.createElement('script');
             tizen.setAttribute('src', '../tizen.js');
