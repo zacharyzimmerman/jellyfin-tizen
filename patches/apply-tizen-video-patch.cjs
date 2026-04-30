@@ -241,17 +241,9 @@ function tizenMsePlay(videoElem, audioUrl, onErrorFn) {
                                 return;
                             }
 
-                            // Combined feed loop: audio + video together in each feed() call
-                            // This is critical — jMuxer mode:'both' needs them together to mux
-                            feedInterval = setInterval(() => {
-                                if (!jmuxerInstance) {
-                                    if (feedInterval) { clearInterval(feedInterval); feedInterval = null; }
-                                    return;
-                                }
-
-                                // Build audio payload for this tick
+                            // Helper: build combined audio+video payload for one tick
+                            function buildFeedData() {
                                 const feedData = { video: keyframe, duration: FEED_INTERVAL_MS };
-
                                 if (audioFrames && audioFrameIndex < audioFrames.length) {
                                     const batch = [];
                                     for (let i = 0; i < AUDIO_FRAMES_PER_TICK && audioFrameIndex < audioFrames.length; i++) {
@@ -268,15 +260,33 @@ function tizenMsePlay(videoElem, audioUrl, onErrorFn) {
                                         feedData.audio = combined;
                                     }
                                 }
+                                return feedData;
+                            }
 
+                            // Pre-buffer ~3 seconds before starting playback
+                            // At 15fps, 3s = ~45 ticks; each tick has 3 audio frames
+                            const PRE_BUFFER_TICKS = 45;
+                            for (let t = 0; t < PRE_BUFFER_TICKS && audioFrameIndex < audioFrames.length; t++) {
                                 try {
-                                    jmuxerInstance.feed(feedData);
+                                    jmuxerInstance.feed(buildFeedData());
+                                } catch (e) { break; }
+                            }
+                            console.debug('[TIZEN-MSE] pre-buffered ' + audioFrameIndex + '/' + audioFrames.length + ' audio frames');
+
+                            // Continue real-time feed loop for remaining audio + video
+                            feedInterval = setInterval(() => {
+                                if (!jmuxerInstance) {
+                                    if (feedInterval) { clearInterval(feedInterval); feedInterval = null; }
+                                    return;
+                                }
+                                try {
+                                    jmuxerInstance.feed(buildFeedData());
                                 } catch (e) {
                                     console.error('[TIZEN-MSE] feed error', e);
                                 }
                             }, FEED_INTERVAL_MS);
 
-                            // Start playback
+                            // Start playback after pre-buffer
                             const tryPlay = () => {
                                 videoElem.play().then(() => {
                                     console.debug('[TIZEN-MSE] playing');
