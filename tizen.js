@@ -267,6 +267,10 @@
     var _artPageVisible = false;
     var _artPageInterval = null;
     var _artPageStyle = null;
+    var _artFocusRow = 'controls'; // 'controls' or 'scrub'
+    var _artFocusIdx = 2; // index into control buttons (0-4), default to play (center)
+    var _lastDuration = 0;
+    var _lastPosition = 0;
 
     function getApiCredentials() {
         try {
@@ -347,18 +351,24 @@
             '.tap-title{font-size:32px;font-weight:600;color:#fff;margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
             '.tap-artist{font-size:22px;color:rgba(255,255,255,0.75);margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
             '.tap-album{font-size:17px;color:rgba(255,255,255,0.45);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+            // Progress / scrub bar — focusable row
             '.tap-progress{display:flex;align-items:center;width:560px;max-width:85vw;margin-bottom:32px}' +
             '.tap-time{font-size:14px;color:rgba(255,255,255,0.5);min-width:48px;font-variant-numeric:tabular-nums}' +
             '.tap-time-cur{text-align:right;margin-right:14px}' +
             '.tap-time-tot{text-align:left;margin-left:14px}' +
-            '.tap-bar{flex:1;height:4px;background:rgba(255,255,255,0.15);border-radius:2px;overflow:hidden}' +
-            '.tap-bar-fill{height:100%;background:#00a4dc;border-radius:2px;width:0%;transition:width 1s linear}' +
-            // Transport controls — match jellyfin-web button style for D-pad nav
-            '.tap-controls{display:flex;align-items:center;justify-content:center;gap:12px}' +
-            '.tap-controls button{background:none;border:none;padding:8px;cursor:pointer;outline:none;-webkit-tap-highlight-color:transparent}' +
-            '.tap-controls button .material-icons{font-size:42px;color:rgba(255,255,255,0.7)}' +
+            '.tap-bar{flex:1;height:4px;background:rgba(255,255,255,0.15);border-radius:2px;overflow:hidden;position:relative}' +
+            '.tap-bar-fill{height:100%;background:#00a4dc;border-radius:2px;width:0%;transition:width 0.3s linear}' +
+            '.tap-scrub-hint{position:absolute;top:-28px;left:50%;transform:translateX(-50%);font-size:13px;color:rgba(255,255,255,0.4);white-space:nowrap;opacity:0;transition:opacity 0.2s}' +
+            '.tap-progress.focused .tap-bar{height:8px}' +
+            '.tap-progress.focused .tap-bar-fill{transition:width 0.1s linear}' +
+            '.tap-progress.focused .tap-scrub-hint{opacity:1}' +
+            '.tap-progress.focused .tap-time{color:rgba(255,255,255,0.8)}' +
+            // Transport controls — plain buttons with manual focus
+            '.tap-controls{display:flex;align-items:center;justify-content:center;gap:16px}' +
+            '.tap-controls button{background:none;border:none;padding:8px;cursor:pointer;outline:none;-webkit-tap-highlight-color:transparent;border-radius:50%}' +
+            '.tap-controls button .material-icons{font-size:42px;color:rgba(255,255,255,0.5);transition:color 0.15s,transform 0.15s}' +
             '.tap-controls button.tap-play-btn .material-icons{font-size:56px}' +
-            '.tap-controls button:focus .material-icons,.tap-controls button:hover .material-icons{color:#00a4dc}';
+            '.tap-controls button.focused .material-icons{color:#00a4dc;transform:scale(1.15)}';
         document.head.appendChild(_artPageStyle);
 
         _artPage = document.createElement('div');
@@ -374,18 +384,24 @@
                 '</div>' +
                 '<div class="tap-progress">' +
                     '<div class="tap-time tap-time-cur">0:00</div>' +
-                    '<div class="tap-bar"><div class="tap-bar-fill"></div></div>' +
+                    '<div class="tap-bar"><div class="tap-bar-fill"></div><div class="tap-scrub-hint">&larr; &rarr; to scrub</div></div>' +
                     '<div class="tap-time tap-time-tot">0:00</div>' +
                 '</div>' +
-                '<div class="tap-controls focuscontainer-x">' +
-                    '<button is="paper-icon-button-light" class="autoSize" data-action="prev" title="Previous Track">' +
-                        '<span class="material-icons skip_previous" aria-hidden="true"></span>' +
+                '<div class="tap-controls">' +
+                    '<button data-action="prev" data-idx="0" title="Previous Track">' +
+                        '<span class="material-icons">skip_previous</span>' +
                     '</button>' +
-                    '<button is="paper-icon-button-light" class="tap-play-btn autoSize" data-action="playpause" title="Play/Pause">' +
-                        '<span class="material-icons pause_circle_filled" aria-hidden="true"></span>' +
+                    '<button data-action="rw" data-idx="1" title="Rewind 10s">' +
+                        '<span class="material-icons">fast_rewind</span>' +
                     '</button>' +
-                    '<button is="paper-icon-button-light" class="autoSize" data-action="next" title="Next Track">' +
-                        '<span class="material-icons skip_next" aria-hidden="true"></span>' +
+                    '<button class="tap-play-btn" data-action="playpause" data-idx="2" title="Play/Pause">' +
+                        '<span class="material-icons">pause_circle_filled</span>' +
+                    '</button>' +
+                    '<button data-action="ff" data-idx="3" title="Fast Forward 10s">' +
+                        '<span class="material-icons">fast_forward</span>' +
+                    '</button>' +
+                    '<button data-action="next" data-idx="4" title="Next Track">' +
+                        '<span class="material-icons">skip_next</span>' +
                     '</button>' +
                 '</div>' +
             '</div>';
@@ -398,6 +414,27 @@
             if (!btn) return;
             execTransport(btn.getAttribute('data-action'));
         });
+    }
+
+    // Manual focus management for D-pad navigation
+    function updateArtFocus() {
+        if (!_artPage) return;
+
+        // Clear all focus highlights
+        var buttons = _artPage.querySelectorAll('.tap-controls button');
+        for (var i = 0; i < buttons.length; i++) {
+            buttons[i].classList.remove('focused');
+        }
+        var progress = _artPage.querySelector('.tap-progress');
+        progress.classList.remove('focused');
+
+        if (_artFocusRow === 'controls') {
+            if (buttons[_artFocusIdx]) {
+                buttons[_artFocusIdx].classList.add('focused');
+            }
+        } else {
+            progress.classList.add('focused');
+        }
     }
 
     function updateArtPage(data) {
@@ -428,6 +465,8 @@
 
         var duration = item.RunTimeTicks || 0;
         var position = playState.PositionTicks || 0;
+        _lastDuration = duration;
+        _lastPosition = position;
         var pct = duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
 
         _artPage.querySelector('.tap-time-cur').textContent = formatTicks(position);
@@ -436,7 +475,7 @@
 
         var playIcon = _artPage.querySelector('.tap-play-btn .material-icons');
         if (playIcon) {
-            playIcon.className = 'material-icons ' + (playState.IsPaused ? 'play_circle_filled' : 'pause_circle_filled');
+            playIcon.textContent = playState.IsPaused ? 'play_circle_filled' : 'pause_circle_filled';
         }
     }
 
@@ -456,9 +495,10 @@
         _artPage.classList.add('visible');
         _artPageVisible = true;
 
-        // Focus play button so D-pad navigation starts there
-        var playBtn = _artPage.querySelector('.tap-play-btn');
-        if (playBtn) playBtn.focus();
+        // Reset focus to play button
+        _artFocusRow = 'controls';
+        _artFocusIdx = 2;
+        updateArtFocus();
 
         // Fetch immediately and then poll every 2s
         refreshArtPage();
@@ -486,62 +526,94 @@
     }
 
     // Transport control helpers
+    var SEEK_STEP_TICKS = 10 * 10000000; // 10 seconds in ticks
+    var SCRUB_STEP_TICKS = 5 * 10000000; // 5 seconds per D-pad press on scrub bar
+
     function execTransport(action) {
         debugLog('transport: ' + action);
 
-        // Try Jellyfin API command first
         var creds = getApiCredentials();
-        if (creds) {
-            var sessionUrl = creds.serverUrl + '/Sessions?api_key=' + creds.token;
-            var xhr = new XMLHttpRequest();
-            xhr.open('GET', sessionUrl);
-            xhr.onload = function () {
-                if (xhr.status !== 200) return fallbackTransport(action);
-                try {
-                    var sessions = JSON.parse(xhr.responseText);
-                    var sessionId = null;
-                    for (var i = 0; i < sessions.length; i++) {
-                        if (sessions[i].UserId === creds.userId && sessions[i].NowPlayingItem) {
-                            sessionId = sessions[i].Id;
-                            break;
-                        }
-                    }
-                    if (!sessionId) return fallbackTransport(action);
+        if (!creds) return fallbackTransport(action);
 
-                    var cmd, cmdUrl;
-                    switch (action) {
-                        case 'playpause':
-                            cmd = 'PlayPause';
-                            cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/' + cmd + '?api_key=' + creds.token;
-                            break;
-                        case 'next':
-                            cmd = 'NextTrack';
-                            cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/' + cmd + '?api_key=' + creds.token;
-                            break;
-                        case 'prev':
-                            cmd = 'PreviousTrack';
-                            cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/' + cmd + '?api_key=' + creds.token;
-                            break;
+        var sessionUrl = creds.serverUrl + '/Sessions?api_key=' + creds.token;
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', sessionUrl);
+        xhr.onload = function () {
+            if (xhr.status !== 200) return fallbackTransport(action);
+            try {
+                var sessions = JSON.parse(xhr.responseText);
+                var sessionId = null;
+                var curPosition = 0;
+                for (var i = 0; i < sessions.length; i++) {
+                    if (sessions[i].UserId === creds.userId && sessions[i].NowPlayingItem) {
+                        sessionId = sessions[i].Id;
+                        curPosition = (sessions[i].PlayState || {}).PositionTicks || 0;
+                        break;
                     }
-                    if (cmdUrl) {
-                        var cmdXhr = new XMLHttpRequest();
-                        cmdXhr.open('POST', cmdUrl);
-                        cmdXhr.send();
-                        // Refresh display after a short delay
+                }
+                if (!sessionId) return fallbackTransport(action);
+
+                var cmdUrl;
+                switch (action) {
+                    case 'playpause':
+                        cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/PlayPause?api_key=' + creds.token;
+                        break;
+                    case 'next':
+                        cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/NextTrack?api_key=' + creds.token;
+                        break;
+                    case 'prev':
+                        cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/PreviousTrack?api_key=' + creds.token;
+                        break;
+                    case 'rw':
+                        var rwPos = Math.max(0, curPosition - SEEK_STEP_TICKS);
+                        cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/Seek?SeekPositionTicks=' + rwPos + '&api_key=' + creds.token;
+                        break;
+                    case 'ff':
+                        var ffPos = curPosition + SEEK_STEP_TICKS;
+                        if (_lastDuration > 0) ffPos = Math.min(ffPos, _lastDuration);
+                        cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/Seek?SeekPositionTicks=' + ffPos + '&api_key=' + creds.token;
+                        break;
+                }
+                if (cmdUrl) {
+                    var cmdXhr = new XMLHttpRequest();
+                    cmdXhr.open('POST', cmdUrl);
+                    cmdXhr.send();
+                    setTimeout(refreshArtPage, 500);
+                }
+            } catch (e) { fallbackTransport(action); }
+        };
+        xhr.onerror = function () { fallbackTransport(action); };
+        xhr.send();
+    }
+
+    function seekToPosition(ticks) {
+        var creds = getApiCredentials();
+        if (!creds) return;
+
+        var sessionUrl = creds.serverUrl + '/Sessions?api_key=' + creds.token;
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', sessionUrl);
+        xhr.onload = function () {
+            if (xhr.status !== 200) return;
+            try {
+                var sessions = JSON.parse(xhr.responseText);
+                for (var i = 0; i < sessions.length; i++) {
+                    if (sessions[i].UserId === creds.userId && sessions[i].NowPlayingItem) {
+                        var seekUrl = creds.serverUrl + '/Sessions/' + sessions[i].Id +
+                            '/Playing/Seek?SeekPositionTicks=' + ticks + '&api_key=' + creds.token;
+                        var sx = new XMLHttpRequest();
+                        sx.open('POST', seekUrl);
+                        sx.send();
                         setTimeout(refreshArtPage, 500);
+                        return;
                     }
-                } catch (e) { fallbackTransport(action); }
-            };
-            xhr.onerror = function () { fallbackTransport(action); };
-            xhr.send();
-            return;
-        }
-
-        fallbackTransport(action);
+                }
+            } catch (e) {}
+        };
+        xhr.send();
     }
 
     function fallbackTransport(action) {
-        // Try Emby global
         try {
             if (window.Emby && window.Emby.PlaybackManager) {
                 var pm = window.Emby.PlaybackManager;
@@ -554,7 +626,6 @@
             }
         } catch (e) {}
 
-        // Dispatch media key events
         var keyMap = { 'playpause': 'MediaPlayPause', 'next': 'MediaTrackNext', 'prev': 'MediaTrackPrevious' };
         if (keyMap[action]) {
             document.dispatchEvent(new KeyboardEvent('keydown', { key: keyMap[action], bubbles: true }));
@@ -801,50 +872,99 @@
     document.addEventListener('keydown', function (e) {
         if (!_artPageVisible) return;
 
+        var handled = true;
+
         switch (e.keyCode) {
+            // --- Media keys ---
             case 415: // MediaPlay
             case 10252: // MediaPlayPause
-                execTransport('playpause');
-                e.preventDefault();
-                e.stopPropagation();
-                break;
             case 19: // MediaPause
                 execTransport('playpause');
-                e.preventDefault();
-                e.stopPropagation();
                 break;
             case 10232: // MediaTrackPrevious
-            case 10233: // MediaRewind
                 execTransport('prev');
-                e.preventDefault();
-                e.stopPropagation();
+                break;
+            case 10233: // MediaRewind
+                execTransport('rw');
                 break;
             case 10234: // MediaTrackNext
-            case 10228: // MediaFastForward
                 execTransport('next');
-                e.preventDefault();
-                e.stopPropagation();
                 break;
-            case 13: // Enter/OK — let it activate the focused button naturally
+            case 10228: // MediaFastForward
+                execTransport('ff');
                 break;
+
+            // --- D-pad navigation ---
             case 37: // ArrowLeft
+                if (_artFocusRow === 'controls') {
+                    _artFocusIdx = Math.max(0, _artFocusIdx - 1);
+                    updateArtFocus();
+                } else {
+                    // Scrub backward 5s
+                    var rwPos = Math.max(0, _lastPosition - SCRUB_STEP_TICKS);
+                    _lastPosition = rwPos;
+                    seekToPosition(rwPos);
+                    // Update bar immediately for responsiveness
+                    if (_artPage && _lastDuration > 0) {
+                        _artPage.querySelector('.tap-bar-fill').style.width = Math.min(100, (rwPos / _lastDuration) * 100) + '%';
+                        _artPage.querySelector('.tap-time-cur').textContent = formatTicks(rwPos);
+                    }
+                }
+                break;
             case 39: // ArrowRight
-                // Let D-pad left/right navigate between transport buttons naturally
-                // but prevent underlying page from scrolling
-                e.stopPropagation();
+                if (_artFocusRow === 'controls') {
+                    _artFocusIdx = Math.min(4, _artFocusIdx + 1);
+                    updateArtFocus();
+                } else {
+                    // Scrub forward 5s
+                    var ffPos = _lastPosition + SCRUB_STEP_TICKS;
+                    if (_lastDuration > 0) ffPos = Math.min(ffPos, _lastDuration);
+                    _lastPosition = ffPos;
+                    seekToPosition(ffPos);
+                    if (_artPage && _lastDuration > 0) {
+                        _artPage.querySelector('.tap-bar-fill').style.width = Math.min(100, (ffPos / _lastDuration) * 100) + '%';
+                        _artPage.querySelector('.tap-time-cur').textContent = formatTicks(ffPos);
+                    }
+                }
                 break;
             case 38: // ArrowUp
-            case 40: // ArrowDown
-                // Prevent vertical navigation from leaving the art page
-                e.preventDefault();
-                e.stopPropagation();
+                if (_artFocusRow === 'scrub') {
+                    _artFocusRow = 'controls';
+                    updateArtFocus();
+                }
                 break;
+            case 40: // ArrowDown
+                if (_artFocusRow === 'controls') {
+                    _artFocusRow = 'scrub';
+                    updateArtFocus();
+                }
+                break;
+
+            // --- Enter/OK — activate focused button ---
+            case 13:
+                if (_artFocusRow === 'controls') {
+                    var buttons = _artPage.querySelectorAll('.tap-controls button');
+                    if (buttons[_artFocusIdx]) {
+                        var action = buttons[_artFocusIdx].getAttribute('data-action');
+                        if (action) execTransport(action);
+                    }
+                }
+                break;
+
+            // --- Back/Escape ---
             case 10009: // Back
             case 27: // Escape
                 hideArtPage();
-                e.preventDefault();
-                e.stopPropagation();
                 break;
+
+            default:
+                handled = false;
+                break;
+        }
+
+        if (handled) {
+            e.preventDefault();
+            e.stopPropagation();
         }
     }, true);
 
