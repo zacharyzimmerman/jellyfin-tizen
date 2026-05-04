@@ -94,14 +94,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "build-${{ github.run_number }}"
-          name: "Jellyfin Tizen (screensaver fix) - Build ${{ github.run_number }}"
+          name: "Jellyfin Tizen - Build ${{ github.run_number }}"
           files: release/*.wgt
           body: |
-            Jellyfin Tizen build with screen saver suppression fix.
+            Custom Jellyfin Tizen build for Samsung OLED TVs.
 
-            Based on jellyfin-web `release-10.10.z` and jellyfin-tizen `fix/suppress-screensaver-during-playback`.
+            Based on jellyfin-web `release-10.10.z`. See [README](https://github.com/zacharyzimmerman/jellyfin-tizen#readme) for full feature list.
+
+            **Features:** OLED screensaver bypass, album art now-playing screen with D-pad transport controls, HLS.js buffer override (120s), server address pre-fill.
 
             ## Install
             1. Download `Jellyfin.wgt` below
             2. Enable Developer Mode on your Samsung TV (Apps → press 1-2-3-4-5 → enable → enter PC IP → restart TV)
-            3. Use [Jellyfin2Samsung installer](https://github.com/Jellyfin2Samsung/Samsung-Jellyfin-Installer) or Tizen Studio to sideload the .wgt file
+            3. Use [Jellyfin2Samsung Installer](https://github.com/Jellyfin2Samsung/Samsung-Jellyfin-Installer) or Tizen Studio to sideload the .wgt file
