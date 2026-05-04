@@ -74,6 +74,9 @@
                 if (_bypassActive) suppressScreenSaver();
             }, 30000);
         }
+
+        // Show the album art header button when audio starts
+        showAlbumArtButton();
     }
 
     function stopBypass() {
@@ -89,6 +92,7 @@
             _screenSaverInterval = null;
         }
         restoreScreenSaver();
+        hideAlbumArtButton();
     }
 
     // ============================================================
@@ -118,13 +122,109 @@
     }
 
     // ============================================================
+    // Header Button — Album Art View
+    // ============================================================
+    //
+    // Injects a button into the jellyfin-web header bar (skinHeader)
+    // next to the existing music_note button. Only visible during
+    // audio playback. Clicking it toggles the album art overlay.
+
+    var _albumArtBtn = null;
+    var _headerInjected = false;
+
+    function injectHeaderButton() {
+        if (_headerInjected) return;
+
+        var header = document.querySelector('.skinHeader .headerRight');
+        if (!header) return;
+
+        // Find the existing audio player button as anchor point
+        var audioBtn = header.querySelector('.headerAudioPlayerButton');
+
+        var btn = document.createElement('button');
+        btn.setAttribute('is', 'paper-icon-button-light');
+        btn.className = 'headerButton headerButtonRight headerAlbumArtButton hide';
+        btn.title = 'Album Art View';
+        btn.innerHTML = '<span class="material-icons album" aria-hidden="true"></span>';
+        btn.addEventListener('click', function () {
+            if (_overlayVisible) {
+                hideOverlay();
+            } else if (_currentMediaInfo) {
+                showOverlay();
+            }
+        });
+
+        // Insert after the audio player button, or as first child of headerRight
+        if (audioBtn && audioBtn.nextSibling) {
+            header.insertBefore(btn, audioBtn.nextSibling);
+        } else if (audioBtn) {
+            header.appendChild(btn);
+        } else {
+            header.insertBefore(btn, header.firstChild);
+        }
+
+        _albumArtBtn = btn;
+        _headerInjected = true;
+        debugLog('album art button injected into header');
+
+        // If audio is already playing, show the button immediately
+        if (_bypassActive) {
+            btn.classList.remove('hide');
+        }
+    }
+
+    function showAlbumArtButton() {
+        if (_albumArtBtn) {
+            _albumArtBtn.classList.remove('hide');
+        }
+    }
+
+    function hideAlbumArtButton() {
+        if (_albumArtBtn) {
+            _albumArtBtn.classList.add('hide');
+        }
+    }
+
+    // Watch for the header to appear in the DOM (it renders after page load)
+    function watchForHeader() {
+        // Try immediately
+        injectHeaderButton();
+        if (_headerInjected) return;
+
+        // Poll briefly — the header renders shortly after load
+        var attempts = 0;
+        var timer = setInterval(function () {
+            attempts++;
+            injectHeaderButton();
+            if (_headerInjected || attempts >= 30) {
+                clearInterval(timer);
+            }
+        }, 500);
+
+        // Also watch for DOM mutations in case header is rebuilt
+        var headerObserver = new MutationObserver(function () {
+            if (!_headerInjected) {
+                injectHeaderButton();
+            } else {
+                // Header may be rebuilt on navigation — re-check
+                var existing = document.querySelector('.headerAlbumArtButton');
+                if (!existing) {
+                    _headerInjected = false;
+                    _albumArtBtn = null;
+                    injectHeaderButton();
+                }
+            }
+        });
+        headerObserver.observe(document.documentElement, { childList: true, subtree: true });
+    }
+
+    // ============================================================
     // Now-Playing Overlay (album art screen)
     // ============================================================
     //
     // Fullscreen overlay that shows album art, track info, and
-    // progress during audio playback. Displayed on top of the
-    // Jellyfin UI when audio is playing. The user can dismiss it
-    // with the Back button and re-show it from the now-playing bar.
+    // progress during audio playback. Opened via the header button.
+    // Dismissed with Back button or by clicking the header button again.
 
     var _overlay = null;
     var _overlayVisible = false;
@@ -154,9 +254,9 @@
                     '<div class="tnp-time tnp-time-total">0:00</div>' +
                 '</div>' +
                 '<div class="tnp-controls">' +
-                    '<div class="tnp-btn" data-action="prev">⏮</div>' +
-                    '<div class="tnp-btn tnp-btn-play" data-action="playpause">⏸</div>' +
-                    '<div class="tnp-btn" data-action="next">⏭</div>' +
+                    '<div class="tnp-btn" data-action="prev">&#x23EE;</div>' +
+                    '<div class="tnp-btn tnp-btn-play" data-action="playpause">&#x23F8;</div>' +
+                    '<div class="tnp-btn" data-action="next">&#x23ED;</div>' +
                 '</div>' +
             '</div>';
 
@@ -268,7 +368,7 @@
         totalTime.textContent = formatTime(info.duration);
 
         _isPaused = !!info.isPaused;
-        playBtn.textContent = _isPaused ? '▶' : '⏸';
+        playBtn.innerHTML = _isPaused ? '&#x25B6;' : '&#x23F8;';
 
         if (typeof info.position === 'number') {
             _playbackPosition = info.position;
@@ -293,6 +393,7 @@
 
     function showOverlay() {
         if (!_overlay) createOverlay();
+        if (_currentMediaInfo) updateOverlayContent(_currentMediaInfo);
         _overlay.classList.add('visible');
         _overlayVisible = true;
 
@@ -315,8 +416,6 @@
     function execTransport(action) {
         debugLog('transport: ' + action);
         try {
-            // jellyfin-web 10.10.x exposes playbackManager on Events object
-            // or as a requirejs module. Try known global paths:
             var pm = null;
 
             // Path 1: Emby global (common in 10.8+)
@@ -370,7 +469,16 @@
     var SERVER_URL = 'https://movies.great-tags.com';
     var SERVER_NAME = 'Jellyfin';
 
+    // ============================================================
+    // Server Address Pre-Fill
+    // ============================================================
+    //
+    // Seeds jellyfin_credentials localStorage so the server appears
+    // in the server list. Also watches for the "Add Server" form
+    // (#txtServerHost) and pre-fills it whenever it appears.
+
     (function preFillServer() {
+        // Seed credentials so server appears in the list
         var creds = localStorage.getItem('jellyfin_credentials');
         var data = null;
         try { data = creds ? JSON.parse(creds) : null; } catch (e) {}
@@ -405,18 +513,45 @@
 
         localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
 
-        var prefillAttempts = 0;
-        var prefillTimer = setInterval(function () {
-            prefillAttempts++;
+        // Fill #txtServerHost whenever the add-server form appears
+        function tryFillServerInput() {
             var input = document.querySelector('#txtServerHost');
             if (input && !input.value) {
                 input.value = SERVER_URL;
                 input.dispatchEvent(new Event('input', { bubbles: true }));
-                clearInterval(prefillTimer);
-            } else if ((input && input.value) || prefillAttempts >= 10) {
-                clearInterval(prefillTimer);
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                debugLog('pre-filled server address');
+                return true;
             }
-        }, 500);
+            return false;
+        }
+
+        // Watch for the form to appear via MutationObserver
+        var fillObserver = new MutationObserver(function () {
+            tryFillServerInput();
+        });
+
+        // Start observing once body exists
+        function startFillObserver() {
+            if (document.body) {
+                fillObserver.observe(document.body, { childList: true, subtree: true });
+            } else {
+                document.addEventListener('DOMContentLoaded', function () {
+                    fillObserver.observe(document.body, { childList: true, subtree: true });
+                });
+            }
+        }
+        startFillObserver();
+
+        // Also check on hash changes (SPA navigation)
+        window.addEventListener('hashchange', function () {
+            // Small delay to let the view render
+            setTimeout(tryFillServerInput, 200);
+            setTimeout(tryFillServerInput, 600);
+        });
+
+        // Initial attempt
+        tryFillServerInput();
     })();
 
     var AppInfo = {
@@ -520,11 +655,7 @@
             if (mediaInfo) {
                 _currentMediaInfo = mediaInfo;
                 updateOverlayContent(mediaInfo);
-
-                // Auto-show overlay on first play
-                if (!_overlayVisible && mediaInfo.action === 'play') {
-                    showOverlay();
-                }
+                // No auto-show — user opens via header button
             }
         },
 
@@ -561,21 +692,18 @@
                 startBypass();
             } else if (isVideoPlayback(el)) {
                 suppressScreenSaver();
-                // Hide now-playing overlay during video playback
                 hideOverlay();
             }
         });
 
         el.addEventListener('pause', function () {
             if (isAudioElement(el)) {
-                // Don't stop bypass on pause — user may resume
-                // Just update play/pause button
                 _isPaused = true;
                 _playbackPosition = _playbackPosition + (Date.now() - _playbackStartTime);
                 _playbackStartTime = Date.now();
                 if (_overlay) {
                     var btn = _overlay.querySelector('.tnp-btn-play');
-                    if (btn) btn.textContent = '▶';
+                    if (btn) btn.innerHTML = '&#x25B6;';
                 }
             } else if (isVideoPlayback(el)) {
                 restoreScreenSaver();
@@ -583,9 +711,7 @@
         });
 
         el.addEventListener('ended', function () {
-            if (isAudioElement(el)) {
-                // Track ended — next track will trigger new updateMediaSession
-            } else if (isVideoPlayback(el)) {
+            if (isVideoPlayback(el)) {
                 restoreScreenSaver();
             }
         });
@@ -678,6 +804,7 @@
 
         createBypassVideo();
         createOverlay();
+        watchForHeader();
     });
 
     function updateKeys() {
