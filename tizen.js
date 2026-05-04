@@ -267,7 +267,6 @@
     var _artPageVisible = false;
     var _artPageInterval = null;
     var _artPageStyle = null;
-    var _artFocusRow = 'controls'; // 'controls' or 'scrub'
     var _artFocusIdx = 2; // index into control buttons (0-4), default to play (center)
     var _lastDuration = 0;
     var _lastPosition = 0;
@@ -351,18 +350,12 @@
             '.tap-title{font-size:32px;font-weight:600;color:#fff;margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
             '.tap-artist{font-size:22px;color:rgba(255,255,255,0.75);margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
             '.tap-album{font-size:17px;color:rgba(255,255,255,0.45);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
-            // Progress / scrub bar — focusable row
             '.tap-progress{display:flex;align-items:center;width:560px;max-width:85vw;margin-bottom:32px}' +
             '.tap-time{font-size:14px;color:rgba(255,255,255,0.5);min-width:48px;font-variant-numeric:tabular-nums}' +
             '.tap-time-cur{text-align:right;margin-right:14px}' +
             '.tap-time-tot{text-align:left;margin-left:14px}' +
-            '.tap-bar{flex:1;height:4px;background:rgba(255,255,255,0.15);border-radius:2px;overflow:hidden;position:relative}' +
-            '.tap-bar-fill{height:100%;background:#00a4dc;border-radius:2px;width:0%;transition:width 0.3s linear}' +
-            '.tap-scrub-hint{position:absolute;top:-28px;left:50%;transform:translateX(-50%);font-size:13px;color:rgba(255,255,255,0.4);white-space:nowrap;opacity:0;transition:opacity 0.2s}' +
-            '.tap-progress.focused .tap-bar{height:8px}' +
-            '.tap-progress.focused .tap-bar-fill{transition:width 0.1s linear}' +
-            '.tap-progress.focused .tap-scrub-hint{opacity:1}' +
-            '.tap-progress.focused .tap-time{color:rgba(255,255,255,0.8)}' +
+            '.tap-bar{flex:1;height:4px;background:rgba(255,255,255,0.15);border-radius:2px;overflow:hidden}' +
+            '.tap-bar-fill{height:100%;background:#00a4dc;border-radius:2px;width:0%;transition:width 1s linear}' +
             // Transport controls — plain buttons with manual focus
             '.tap-controls{display:flex;align-items:center;justify-content:center;gap:16px}' +
             '.tap-controls button{background:none;border:none;padding:8px;cursor:pointer;outline:none;-webkit-tap-highlight-color:transparent;border-radius:50%}' +
@@ -384,7 +377,7 @@
                 '</div>' +
                 '<div class="tap-progress">' +
                     '<div class="tap-time tap-time-cur">0:00</div>' +
-                    '<div class="tap-bar"><div class="tap-bar-fill"></div><div class="tap-scrub-hint">&larr; &rarr; to scrub</div></div>' +
+                    '<div class="tap-bar"><div class="tap-bar-fill"></div></div>' +
                     '<div class="tap-time tap-time-tot">0:00</div>' +
                 '</div>' +
                 '<div class="tap-controls">' +
@@ -392,13 +385,13 @@
                         '<span class="material-icons">skip_previous</span>' +
                     '</button>' +
                     '<button data-action="rw" data-idx="1" title="Rewind 10s">' +
-                        '<span class="material-icons">fast_rewind</span>' +
+                        '<span class="material-icons">replay_10</span>' +
                     '</button>' +
                     '<button class="tap-play-btn" data-action="playpause" data-idx="2" title="Play/Pause">' +
                         '<span class="material-icons">pause_circle_filled</span>' +
                     '</button>' +
-                    '<button data-action="ff" data-idx="3" title="Fast Forward 10s">' +
-                        '<span class="material-icons">fast_forward</span>' +
+                    '<button data-action="ff" data-idx="3" title="Forward 10s">' +
+                        '<span class="material-icons">forward_10</span>' +
                     '</button>' +
                     '<button data-action="next" data-idx="4" title="Next Track">' +
                         '<span class="material-icons">skip_next</span>' +
@@ -420,20 +413,12 @@
     function updateArtFocus() {
         if (!_artPage) return;
 
-        // Clear all focus highlights
         var buttons = _artPage.querySelectorAll('.tap-controls button');
         for (var i = 0; i < buttons.length; i++) {
             buttons[i].classList.remove('focused');
         }
-        var progress = _artPage.querySelector('.tap-progress');
-        progress.classList.remove('focused');
-
-        if (_artFocusRow === 'controls') {
-            if (buttons[_artFocusIdx]) {
-                buttons[_artFocusIdx].classList.add('focused');
-            }
-        } else {
-            progress.classList.add('focused');
+        if (buttons[_artFocusIdx]) {
+            buttons[_artFocusIdx].classList.add('focused');
         }
     }
 
@@ -496,7 +481,6 @@
         _artPageVisible = true;
 
         // Reset focus to play button
-        _artFocusRow = 'controls';
         _artFocusIdx = 2;
         updateArtFocus();
 
@@ -527,7 +511,6 @@
 
     // Transport control helpers
     var SEEK_STEP_TICKS = 10 * 10000000; // 10 seconds in ticks
-    var SCRUB_STEP_TICKS = 5 * 10000000; // 5 seconds per D-pad press on scrub bar
 
     function execTransport(action) {
         debugLog('transport: ' + action);
@@ -554,6 +537,7 @@
                 if (!sessionId) return fallbackTransport(action);
 
                 var cmdUrl;
+                var RESTART_THRESHOLD = 3 * 10000000; // 3 seconds in ticks
                 switch (action) {
                     case 'playpause':
                         cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/PlayPause?api_key=' + creds.token;
@@ -562,7 +546,12 @@
                         cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/NextTrack?api_key=' + creds.token;
                         break;
                     case 'prev':
-                        cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/PreviousTrack?api_key=' + creds.token;
+                        // If more than 3s into track, restart it; otherwise go to previous
+                        if (curPosition > RESTART_THRESHOLD) {
+                            cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/Seek?SeekPositionTicks=0&api_key=' + creds.token;
+                        } else {
+                            cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/PreviousTrack?api_key=' + creds.token;
+                        }
                         break;
                     case 'rw':
                         var rwPos = Math.max(0, curPosition - SEEK_STEP_TICKS);
@@ -583,33 +572,6 @@
             } catch (e) { fallbackTransport(action); }
         };
         xhr.onerror = function () { fallbackTransport(action); };
-        xhr.send();
-    }
-
-    function seekToPosition(ticks) {
-        var creds = getApiCredentials();
-        if (!creds) return;
-
-        var sessionUrl = creds.serverUrl + '/Sessions?api_key=' + creds.token;
-        var xhr = new XMLHttpRequest();
-        xhr.open('GET', sessionUrl);
-        xhr.onload = function () {
-            if (xhr.status !== 200) return;
-            try {
-                var sessions = JSON.parse(xhr.responseText);
-                for (var i = 0; i < sessions.length; i++) {
-                    if (sessions[i].UserId === creds.userId && sessions[i].NowPlayingItem) {
-                        var seekUrl = creds.serverUrl + '/Sessions/' + sessions[i].Id +
-                            '/Playing/Seek?SeekPositionTicks=' + ticks + '&api_key=' + creds.token;
-                        var sx = new XMLHttpRequest();
-                        sx.open('POST', seekUrl);
-                        sx.send();
-                        setTimeout(refreshArtPage, 500);
-                        return;
-                    }
-                }
-            } catch (e) {}
-        };
         xhr.send();
     }
 
@@ -896,58 +858,24 @@
 
             // --- D-pad navigation ---
             case 37: // ArrowLeft
-                if (_artFocusRow === 'controls') {
-                    _artFocusIdx = Math.max(0, _artFocusIdx - 1);
-                    updateArtFocus();
-                } else {
-                    // Scrub backward 5s
-                    var rwPos = Math.max(0, _lastPosition - SCRUB_STEP_TICKS);
-                    _lastPosition = rwPos;
-                    seekToPosition(rwPos);
-                    // Update bar immediately for responsiveness
-                    if (_artPage && _lastDuration > 0) {
-                        _artPage.querySelector('.tap-bar-fill').style.width = Math.min(100, (rwPos / _lastDuration) * 100) + '%';
-                        _artPage.querySelector('.tap-time-cur').textContent = formatTicks(rwPos);
-                    }
-                }
+                _artFocusIdx = Math.max(0, _artFocusIdx - 1);
+                updateArtFocus();
                 break;
             case 39: // ArrowRight
-                if (_artFocusRow === 'controls') {
-                    _artFocusIdx = Math.min(4, _artFocusIdx + 1);
-                    updateArtFocus();
-                } else {
-                    // Scrub forward 5s
-                    var ffPos = _lastPosition + SCRUB_STEP_TICKS;
-                    if (_lastDuration > 0) ffPos = Math.min(ffPos, _lastDuration);
-                    _lastPosition = ffPos;
-                    seekToPosition(ffPos);
-                    if (_artPage && _lastDuration > 0) {
-                        _artPage.querySelector('.tap-bar-fill').style.width = Math.min(100, (ffPos / _lastDuration) * 100) + '%';
-                        _artPage.querySelector('.tap-time-cur').textContent = formatTicks(ffPos);
-                    }
-                }
+                _artFocusIdx = Math.min(4, _artFocusIdx + 1);
+                updateArtFocus();
                 break;
             case 38: // ArrowUp
-                if (_artFocusRow === 'scrub') {
-                    _artFocusRow = 'controls';
-                    updateArtFocus();
-                }
-                break;
             case 40: // ArrowDown
-                if (_artFocusRow === 'controls') {
-                    _artFocusRow = 'scrub';
-                    updateArtFocus();
-                }
+                // No vertical navigation — single row of controls
                 break;
 
             // --- Enter/OK — activate focused button ---
             case 13:
-                if (_artFocusRow === 'controls') {
-                    var buttons = _artPage.querySelectorAll('.tap-controls button');
-                    if (buttons[_artFocusIdx]) {
-                        var action = buttons[_artFocusIdx].getAttribute('data-action');
-                        if (action) execTransport(action);
-                    }
+                var buttons = _artPage.querySelectorAll('.tap-controls button');
+                if (buttons[_artFocusIdx]) {
+                    var action = buttons[_artFocusIdx].getAttribute('data-action');
+                    if (action) execTransport(action);
                 }
                 break;
 
