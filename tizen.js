@@ -3,14 +3,12 @@
 
     console.log('Tizen adapter');
 
-    // Debug logging — console only (no on-screen overlay)
     function debugLog(msg) {
         var text = typeof msg === 'object' ? JSON.stringify(msg) : String(msg);
         console.log('[TIZEN] ' + text);
     }
 
     function postMessage() {
-        // Quiet — only log to console for remote debugging
         var parts = [];
         for (var a = 0; a < arguments.length; a++) {
             parts.push(typeof arguments[a] === 'object' ? JSON.stringify(arguments[a]) : String(arguments[a]));
@@ -21,17 +19,6 @@
     // ============================================================
     // OLED Screensaver Bypass
     // ============================================================
-    //
-    // Samsung OLED TVs have firmware-level burn-in protection that
-    // activates after ~2 minutes of static pixels. The only reliable
-    // way to prevent it is to have CHANGING PIXELS on the display.
-    //
-    // Strategy: When audio playback starts, show a fullscreen
-    // <video> element behind the Jellyfin UI that loops a subtle
-    // dark animation (screensaver-bypass.mp4). Combined with
-    // setScreenSaver(OFF) and tizen.power.request() as secondary.
-    //
-    // screensaver-bypass.mp4: 128x72 H.264 Baseline, 2fps, 60s, ~25KB
 
     var _bypassVideo = null;
     var _bypassActive = false;
@@ -75,8 +62,7 @@
             }, 30000);
         }
 
-        // Show the album art header button when audio starts
-        showAlbumArtButton();
+        showNowPlayingButton();
     }
 
     function stopBypass() {
@@ -92,7 +78,7 @@
             _screenSaverInterval = null;
         }
         restoreScreenSaver();
-        hideAlbumArtButton();
+        hideNowPlayingButton();
     }
 
     // ============================================================
@@ -125,11 +111,12 @@
     // Header Button — Album Art View
     // ============================================================
     //
-    // Injects a button into the jellyfin-web header bar (skinHeader)
-    // next to the existing music_note button. Only visible during
-    // audio playback. Clicking it toggles the album art overlay.
+    // Injects an "album" icon button into the skinHeader next to
+    // the existing music_note button. Visible during audio playback.
+    // Clicking it opens the album art page (fullscreen overlay that
+    // fetches current playback from the Jellyfin API).
 
-    var _albumArtBtn = null;
+    var _nowPlayingBtn = null;
     var _headerInjected = false;
 
     function injectHeaderButton() {
@@ -138,23 +125,17 @@
         var header = document.querySelector('.skinHeader .headerRight');
         if (!header) return;
 
-        // Find the existing audio player button as anchor point
         var audioBtn = header.querySelector('.headerAudioPlayerButton');
 
         var btn = document.createElement('button');
         btn.setAttribute('is', 'paper-icon-button-light');
         btn.className = 'headerButton headerButtonRight headerAlbumArtButton hide';
-        btn.title = 'Album Art View';
+        btn.title = 'Album Art';
         btn.innerHTML = '<span class="material-icons album" aria-hidden="true"></span>';
         btn.addEventListener('click', function () {
-            if (_overlayVisible) {
-                hideOverlay();
-            } else if (_currentMediaInfo) {
-                showOverlay();
-            }
+            toggleAlbumArtPage();
         });
 
-        // Insert after the audio player button, or as first child of headerRight
         if (audioBtn && audioBtn.nextSibling) {
             header.insertBefore(btn, audioBtn.nextSibling);
         } else if (audioBtn) {
@@ -163,54 +144,42 @@
             header.insertBefore(btn, header.firstChild);
         }
 
-        _albumArtBtn = btn;
+        _nowPlayingBtn = btn;
         _headerInjected = true;
         debugLog('album art button injected into header');
 
-        // If audio is already playing, show the button immediately
         if (_bypassActive) {
             btn.classList.remove('hide');
         }
     }
 
-    function showAlbumArtButton() {
-        if (_albumArtBtn) {
-            _albumArtBtn.classList.remove('hide');
-        }
+    function showNowPlayingButton() {
+        if (_nowPlayingBtn) _nowPlayingBtn.classList.remove('hide');
     }
 
-    function hideAlbumArtButton() {
-        if (_albumArtBtn) {
-            _albumArtBtn.classList.add('hide');
-        }
+    function hideNowPlayingButton() {
+        if (_nowPlayingBtn) _nowPlayingBtn.classList.add('hide');
     }
 
-    // Watch for the header to appear in the DOM (it renders after page load)
     function watchForHeader() {
-        // Try immediately
         injectHeaderButton();
         if (_headerInjected) return;
 
-        // Poll briefly — the header renders shortly after load
         var attempts = 0;
         var timer = setInterval(function () {
             attempts++;
             injectHeaderButton();
-            if (_headerInjected || attempts >= 30) {
-                clearInterval(timer);
-            }
+            if (_headerInjected || attempts >= 30) clearInterval(timer);
         }, 500);
 
-        // Also watch for DOM mutations in case header is rebuilt
         var headerObserver = new MutationObserver(function () {
             if (!_headerInjected) {
                 injectHeaderButton();
             } else {
-                // Header may be rebuilt on navigation — re-check
                 var existing = document.querySelector('.headerAlbumArtButton');
                 if (!existing) {
                     _headerInjected = false;
-                    _albumArtBtn = null;
+                    _nowPlayingBtn = null;
                     injectHeaderButton();
                 }
             }
@@ -219,211 +188,283 @@
     }
 
     // ============================================================
-    // Now-Playing Overlay (album art screen)
+    // Album Art Page
     // ============================================================
     //
-    // Fullscreen overlay that shows album art, track info, and
-    // progress during audio playback. Opened via the header button.
-    // Dismissed with Back button or by clicking the header button again.
+    // Fullscreen page showing large album art, blurred background,
+    // track info, progress bar, and transport controls. Fetches
+    // playback state directly from the Jellyfin API so it works
+    // regardless of whether updateMediaSession is called.
 
-    var _overlay = null;
-    var _overlayVisible = false;
-    var _currentMediaInfo = null;
-    var _progressInterval = null;
-    var _playbackStartTime = 0;
-    var _playbackPosition = 0;
-    var _isPaused = false;
+    var _artPage = null;
+    var _artPageVisible = false;
+    var _artPageInterval = null;
+    var _artPageStyle = null;
 
-    function createOverlay() {
-        if (_overlay) return _overlay;
-
-        var el = document.createElement('div');
-        el.id = 'tizen-now-playing';
-        el.innerHTML =
-            '<div class="tnp-bg"></div>' +
-            '<div class="tnp-content">' +
-                '<div class="tnp-art-wrap"><img class="tnp-art" src="" alt=""></div>' +
-                '<div class="tnp-info">' +
-                    '<div class="tnp-title"></div>' +
-                    '<div class="tnp-artist"></div>' +
-                    '<div class="tnp-album"></div>' +
-                '</div>' +
-                '<div class="tnp-progress-wrap">' +
-                    '<div class="tnp-time tnp-time-current">0:00</div>' +
-                    '<div class="tnp-bar"><div class="tnp-bar-fill"></div></div>' +
-                    '<div class="tnp-time tnp-time-total">0:00</div>' +
-                '</div>' +
-                '<div class="tnp-controls">' +
-                    '<div class="tnp-btn" data-action="prev">&#x23EE;</div>' +
-                    '<div class="tnp-btn tnp-btn-play" data-action="playpause">&#x23F8;</div>' +
-                    '<div class="tnp-btn" data-action="next">&#x23ED;</div>' +
-                '</div>' +
-            '</div>';
-
-        var style = document.createElement('style');
-        style.textContent =
-            '#tizen-now-playing {' +
-                'position:fixed;top:0;left:0;width:100vw;height:100vh;' +
-                'z-index:99999;display:none;' +
-            '}' +
-            '#tizen-now-playing.visible { display:flex; }' +
-            '.tnp-bg {' +
-                'position:absolute;top:0;left:0;width:100%;height:100%;' +
-                'background-size:cover;background-position:center;' +
-                'filter:blur(40px) brightness(0.3);' +
-                'transform:scale(1.2);' +
-            '}' +
-            '.tnp-content {' +
-                'position:relative;z-index:1;width:100%;height:100%;' +
-                'display:flex;flex-direction:column;align-items:center;justify-content:center;' +
-                'padding:40px;box-sizing:border-box;' +
-            '}' +
-            '.tnp-art-wrap {' +
-                'width:400px;height:400px;border-radius:8px;overflow:hidden;' +
-                'box-shadow:0 16px 48px rgba(0,0,0,0.6);margin-bottom:32px;' +
-                'background:#222;' +
-            '}' +
-            '.tnp-art {' +
-                'width:100%;height:100%;object-fit:cover;display:block;' +
-            '}' +
-            '.tnp-info {' +
-                'text-align:center;margin-bottom:24px;max-width:600px;' +
-            '}' +
-            '.tnp-title {' +
-                'font-size:28px;font-weight:600;color:#fff;' +
-                'margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
-            '}' +
-            '.tnp-artist {' +
-                'font-size:20px;color:rgba(255,255,255,0.8);' +
-                'margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
-            '}' +
-            '.tnp-album {' +
-                'font-size:16px;color:rgba(255,255,255,0.5);' +
-                'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
-            '}' +
-            '.tnp-progress-wrap {' +
-                'display:flex;align-items:center;width:500px;max-width:80vw;margin-bottom:24px;' +
-            '}' +
-            '.tnp-time {' +
-                'font-size:14px;color:rgba(255,255,255,0.6);min-width:44px;' +
-                'font-variant-numeric:tabular-nums;' +
-            '}' +
-            '.tnp-time-current { text-align:right;margin-right:12px; }' +
-            '.tnp-time-total { text-align:left;margin-left:12px; }' +
-            '.tnp-bar {' +
-                'flex:1;height:4px;background:rgba(255,255,255,0.2);border-radius:2px;' +
-                'overflow:hidden;' +
-            '}' +
-            '.tnp-bar-fill {' +
-                'height:100%;background:#00a4dc;border-radius:2px;width:0%;' +
-                'transition:width 1s linear;' +
-            '}' +
-            '.tnp-controls {' +
-                'display:flex;align-items:center;gap:32px;' +
-            '}' +
-            '.tnp-btn {' +
-                'font-size:32px;color:rgba(255,255,255,0.8);cursor:pointer;' +
-                'padding:8px;user-select:none;' +
-            '}' +
-            '.tnp-btn-play { font-size:44px; }' +
-            '.tnp-btn:focus,.tnp-btn:hover { color:#00a4dc; }';
-
-        document.head.appendChild(style);
-        (document.body || document.documentElement).appendChild(el);
-        _overlay = el;
-        return el;
+    function getApiCredentials() {
+        try {
+            var creds = JSON.parse(localStorage.getItem('jellyfin_credentials') || '{}');
+            var servers = creds.Servers || [];
+            for (var i = 0; i < servers.length; i++) {
+                var s = servers[i];
+                if (s.AccessToken && s.UserId) {
+                    var url = s.ManualAddress || s.LocalAddress || s.RemoteAddress;
+                    return { serverUrl: url, userId: s.UserId, token: s.AccessToken };
+                }
+            }
+        } catch (e) {}
+        return null;
     }
 
-    function formatTime(ms) {
-        if (!ms || ms < 0) return '0:00';
-        var totalSec = Math.floor(ms / 1000);
+    function fetchNowPlaying(creds, callback) {
+        var url = creds.serverUrl + '/Sessions?api_key=' + creds.token;
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', url);
+        xhr.onload = function () {
+            if (xhr.status !== 200) return callback(null);
+            try {
+                var sessions = JSON.parse(xhr.responseText);
+                for (var i = 0; i < sessions.length; i++) {
+                    var s = sessions[i];
+                    if (s.UserId === creds.userId && s.NowPlayingItem) {
+                        callback({
+                            item: s.NowPlayingItem,
+                            playState: s.PlayState || {},
+                            serverUrl: creds.serverUrl,
+                            token: creds.token
+                        });
+                        return;
+                    }
+                }
+                callback(null);
+            } catch (e) { callback(null); }
+        };
+        xhr.onerror = function () { callback(null); };
+        xhr.send();
+    }
+
+    function getImageUrl(item, serverUrl, maxHeight) {
+        var h = maxHeight || 600;
+        // Primary image (album art)
+        if (item.ImageTags && item.ImageTags.Primary) {
+            return serverUrl + '/Items/' + item.Id + '/Images/Primary?maxHeight=' + h + '&tag=' + item.ImageTags.Primary + '&quality=96';
+        }
+        // Parent (album) image
+        if (item.AlbumId && item.AlbumPrimaryImageTag) {
+            return serverUrl + '/Items/' + item.AlbumId + '/Images/Primary?maxHeight=' + h + '&tag=' + item.AlbumPrimaryImageTag + '&quality=96';
+        }
+        return '';
+    }
+
+    function formatTicks(ticks) {
+        if (!ticks || ticks <= 0) return '0:00';
+        var totalSec = Math.floor(ticks / 10000000);
         var min = Math.floor(totalSec / 60);
         var sec = totalSec % 60;
         return min + ':' + (sec < 10 ? '0' : '') + sec;
     }
 
-    function updateOverlayContent(info) {
-        if (!_overlay) createOverlay();
+    function ensureArtPageDOM() {
+        if (_artPage) return;
 
-        var art = _overlay.querySelector('.tnp-art');
-        var bg = _overlay.querySelector('.tnp-bg');
-        var title = _overlay.querySelector('.tnp-title');
-        var artist = _overlay.querySelector('.tnp-artist');
-        var album = _overlay.querySelector('.tnp-album');
-        var totalTime = _overlay.querySelector('.tnp-time-total');
-        var playBtn = _overlay.querySelector('.tnp-btn-play');
+        _artPageStyle = document.createElement('style');
+        _artPageStyle.textContent =
+            '#tizen-art-page{position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99999;display:none;background:#000}' +
+            '#tizen-art-page.visible{display:flex}' +
+            '.tap-bg{position:absolute;top:0;left:0;width:100%;height:100%;background-size:cover;background-position:center;filter:blur(50px) brightness(0.25) saturate(1.2);transform:scale(1.3)}' +
+            '.tap-content{position:relative;z-index:1;width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px;box-sizing:border-box}' +
+            '.tap-art-wrap{width:480px;height:480px;border-radius:12px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.7);margin-bottom:40px;background:#1a1a1a;display:flex;align-items:center;justify-content:center}' +
+            '.tap-art{width:100%;height:100%;object-fit:cover;display:block}' +
+            '.tap-no-art{color:rgba(255,255,255,0.2);font-size:120px}' +
+            '.tap-info{text-align:center;margin-bottom:32px;max-width:700px;width:100%}' +
+            '.tap-title{font-size:32px;font-weight:600;color:#fff;margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+            '.tap-artist{font-size:22px;color:rgba(255,255,255,0.75);margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+            '.tap-album{font-size:17px;color:rgba(255,255,255,0.45);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+            '.tap-progress{display:flex;align-items:center;width:560px;max-width:85vw;margin-bottom:32px}' +
+            '.tap-time{font-size:14px;color:rgba(255,255,255,0.5);min-width:48px;font-variant-numeric:tabular-nums}' +
+            '.tap-time-cur{text-align:right;margin-right:14px}' +
+            '.tap-time-tot{text-align:left;margin-left:14px}' +
+            '.tap-bar{flex:1;height:4px;background:rgba(255,255,255,0.15);border-radius:2px;overflow:hidden}' +
+            '.tap-bar-fill{height:100%;background:#00a4dc;border-radius:2px;width:0%;transition:width 1s linear}' +
+            '.tap-controls{display:flex;align-items:center;gap:40px}' +
+            '.tap-ctrl{font-size:36px;color:rgba(255,255,255,0.7);cursor:pointer;padding:10px;user-select:none;background:none;border:none;outline:none;font-family:inherit}' +
+            '.tap-ctrl-play{font-size:52px}' +
+            '.tap-ctrl:focus,.tap-ctrl:hover{color:#00a4dc}';
+        document.head.appendChild(_artPageStyle);
 
-        if (info.imageUrl) {
-            art.src = info.imageUrl;
-            bg.style.backgroundImage = 'url(' + info.imageUrl + ')';
+        _artPage = document.createElement('div');
+        _artPage.id = 'tizen-art-page';
+        _artPage.innerHTML =
+            '<div class="tap-bg"></div>' +
+            '<div class="tap-content">' +
+                '<div class="tap-art-wrap"><img class="tap-art" src="" alt=""><span class="tap-no-art" style="display:none">&#x266B;</span></div>' +
+                '<div class="tap-info">' +
+                    '<div class="tap-title"></div>' +
+                    '<div class="tap-artist"></div>' +
+                    '<div class="tap-album"></div>' +
+                '</div>' +
+                '<div class="tap-progress">' +
+                    '<div class="tap-time tap-time-cur">0:00</div>' +
+                    '<div class="tap-bar"><div class="tap-bar-fill"></div></div>' +
+                    '<div class="tap-time tap-time-tot">0:00</div>' +
+                '</div>' +
+                '<div class="tap-controls">' +
+                    '<button class="tap-ctrl" data-action="prev">&#x23EE;</button>' +
+                    '<button class="tap-ctrl tap-ctrl-play" data-action="playpause">&#x23F8;</button>' +
+                    '<button class="tap-ctrl" data-action="next">&#x23ED;</button>' +
+                '</div>' +
+            '</div>';
+
+        document.body.appendChild(_artPage);
+
+        // Transport control clicks
+        _artPage.addEventListener('click', function (e) {
+            var btn = e.target.closest('.tap-ctrl');
+            if (!btn) return;
+            var action = btn.getAttribute('data-action');
+            if (action) execTransport(action);
+        });
+    }
+
+    function updateArtPage(data) {
+        if (!_artPage) return;
+
+        var item = data.item;
+        var playState = data.playState;
+        var imgUrl = getImageUrl(item, data.serverUrl, 600);
+
+        var art = _artPage.querySelector('.tap-art');
+        var noArt = _artPage.querySelector('.tap-no-art');
+        var bg = _artPage.querySelector('.tap-bg');
+
+        if (imgUrl) {
+            art.src = imgUrl;
+            art.style.display = 'block';
+            noArt.style.display = 'none';
+            bg.style.backgroundImage = 'url(' + imgUrl + ')';
         } else {
-            art.src = '';
+            art.style.display = 'none';
+            noArt.style.display = 'block';
             bg.style.backgroundImage = 'none';
-            bg.style.background = '#111';
         }
 
-        title.textContent = info.title || '';
-        artist.textContent = info.artist || '';
-        album.textContent = info.album || '';
-        totalTime.textContent = formatTime(info.duration);
+        _artPage.querySelector('.tap-title').textContent = item.Name || '';
+        _artPage.querySelector('.tap-artist').textContent = item.Artists ? item.Artists.join(', ') : (item.AlbumArtist || '');
+        _artPage.querySelector('.tap-album').textContent = item.Album || '';
 
-        _isPaused = !!info.isPaused;
-        playBtn.innerHTML = _isPaused ? '&#x25B6;' : '&#x23F8;';
+        var duration = item.RunTimeTicks || 0;
+        var position = playState.PositionTicks || 0;
+        var pct = duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
 
-        if (typeof info.position === 'number') {
-            _playbackPosition = info.position;
-            _playbackStartTime = Date.now();
-        }
-        updateProgress();
+        _artPage.querySelector('.tap-time-cur').textContent = formatTicks(position);
+        _artPage.querySelector('.tap-time-tot').textContent = formatTicks(duration);
+        _artPage.querySelector('.tap-bar-fill').style.width = pct + '%';
+
+        var playBtn = _artPage.querySelector('.tap-ctrl-play');
+        playBtn.innerHTML = playState.IsPaused ? '&#x25B6;' : '&#x23F8;';
     }
 
-    function updateProgress() {
-        if (!_overlay || !_currentMediaInfo) return;
+    function refreshArtPage() {
+        var creds = getApiCredentials();
+        if (!creds) return;
 
-        var elapsed = _isPaused ? 0 : (Date.now() - _playbackStartTime);
-        var current = _playbackPosition + elapsed;
-        var duration = _currentMediaInfo.duration || 1;
-        var pct = Math.min(100, (current / duration) * 100);
-
-        var fill = _overlay.querySelector('.tnp-bar-fill');
-        var curTime = _overlay.querySelector('.tnp-time-current');
-        if (fill) fill.style.width = pct + '%';
-        if (curTime) curTime.textContent = formatTime(current);
+        fetchNowPlaying(creds, function (data) {
+            if (data) {
+                updateArtPage(data);
+            }
+        });
     }
 
-    function showOverlay() {
-        if (!_overlay) createOverlay();
-        if (_currentMediaInfo) updateOverlayContent(_currentMediaInfo);
-        _overlay.classList.add('visible');
-        _overlayVisible = true;
+    function showArtPage() {
+        ensureArtPageDOM();
+        _artPage.classList.add('visible');
+        _artPageVisible = true;
 
-        if (!_progressInterval) {
-            _progressInterval = setInterval(updateProgress, 1000);
+        // Fetch immediately and then poll every 2s
+        refreshArtPage();
+        if (!_artPageInterval) {
+            _artPageInterval = setInterval(refreshArtPage, 2000);
         }
     }
 
-    function hideOverlay() {
-        if (_overlay) _overlay.classList.remove('visible');
-        _overlayVisible = false;
+    function hideArtPage() {
+        if (_artPage) _artPage.classList.remove('visible');
+        _artPageVisible = false;
 
-        if (_progressInterval) {
-            clearInterval(_progressInterval);
-            _progressInterval = null;
+        if (_artPageInterval) {
+            clearInterval(_artPageInterval);
+            _artPageInterval = null;
         }
     }
 
-    // Transport control helpers — try multiple API paths
+    function toggleAlbumArtPage() {
+        if (_artPageVisible) {
+            hideArtPage();
+        } else {
+            showArtPage();
+        }
+    }
+
+    // Transport control helpers
     function execTransport(action) {
         debugLog('transport: ' + action);
+
+        // Try Jellyfin API command first
+        var creds = getApiCredentials();
+        if (creds) {
+            var sessionUrl = creds.serverUrl + '/Sessions?api_key=' + creds.token;
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', sessionUrl);
+            xhr.onload = function () {
+                if (xhr.status !== 200) return fallbackTransport(action);
+                try {
+                    var sessions = JSON.parse(xhr.responseText);
+                    var sessionId = null;
+                    for (var i = 0; i < sessions.length; i++) {
+                        if (sessions[i].UserId === creds.userId && sessions[i].NowPlayingItem) {
+                            sessionId = sessions[i].Id;
+                            break;
+                        }
+                    }
+                    if (!sessionId) return fallbackTransport(action);
+
+                    var cmd, cmdUrl;
+                    switch (action) {
+                        case 'playpause':
+                            cmd = 'PlayPause';
+                            cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/' + cmd + '?api_key=' + creds.token;
+                            break;
+                        case 'next':
+                            cmd = 'NextTrack';
+                            cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/' + cmd + '?api_key=' + creds.token;
+                            break;
+                        case 'prev':
+                            cmd = 'PreviousTrack';
+                            cmdUrl = creds.serverUrl + '/Sessions/' + sessionId + '/Playing/' + cmd + '?api_key=' + creds.token;
+                            break;
+                    }
+                    if (cmdUrl) {
+                        var cmdXhr = new XMLHttpRequest();
+                        cmdXhr.open('POST', cmdUrl);
+                        cmdXhr.send();
+                        // Refresh display after a short delay
+                        setTimeout(refreshArtPage, 500);
+                    }
+                } catch (e) { fallbackTransport(action); }
+            };
+            xhr.onerror = function () { fallbackTransport(action); };
+            xhr.send();
+            return;
+        }
+
+        fallbackTransport(action);
+    }
+
+    function fallbackTransport(action) {
+        // Try Emby global
         try {
-            var pm = null;
-
-            // Path 1: Emby global (common in 10.8+)
             if (window.Emby && window.Emby.PlaybackManager) {
-                pm = window.Emby.PlaybackManager;
-            }
-
-            if (pm) {
+                var pm = window.Emby.PlaybackManager;
                 switch (action) {
                     case 'playpause': pm.playPause(); break;
                     case 'next': pm.nextTrack(); break;
@@ -431,21 +472,12 @@
                 }
                 return;
             }
+        } catch (e) {}
 
-            // Path 2: Dispatch media key events (works with jellyfin-web's key handler)
-            var keyMap = {
-                'playpause': 'MediaPlayPause',
-                'next': 'MediaTrackNext',
-                'prev': 'MediaTrackPrevious'
-            };
-            if (keyMap[action]) {
-                document.dispatchEvent(new KeyboardEvent('keydown', {
-                    key: keyMap[action],
-                    bubbles: true
-                }));
-            }
-        } catch (e) {
-            debugLog('transport error: ' + e.message);
+        // Dispatch media key events
+        var keyMap = { 'playpause': 'MediaPlayPause', 'next': 'MediaTrackNext', 'prev': 'MediaTrackPrevious' };
+        if (keyMap[action]) {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: keyMap[action], bubbles: true }));
         }
     }
 
@@ -472,13 +504,8 @@
     // ============================================================
     // Server Address Pre-Fill
     // ============================================================
-    //
-    // Seeds jellyfin_credentials localStorage so the server appears
-    // in the server list. Also watches for the "Add Server" form
-    // (#txtServerHost) and pre-fills it whenever it appears.
 
     (function preFillServer() {
-        // Seed credentials so server appears in the list
         var creds = localStorage.getItem('jellyfin_credentials');
         var data = null;
         try { data = creds ? JSON.parse(creds) : null; } catch (e) {}
@@ -513,7 +540,6 @@
 
         localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
 
-        // Fill #txtServerHost whenever the add-server form appears
         function tryFillServerInput() {
             var input = document.querySelector('#txtServerHost');
             if (input && !input.value) {
@@ -526,12 +552,10 @@
             return false;
         }
 
-        // Watch for the form to appear via MutationObserver
         var fillObserver = new MutationObserver(function () {
             tryFillServerInput();
         });
 
-        // Start observing once body exists
         function startFillObserver() {
             if (document.body) {
                 fillObserver.observe(document.body, { childList: true, subtree: true });
@@ -543,14 +567,11 @@
         }
         startFillObserver();
 
-        // Also check on hash changes (SPA navigation)
         window.addEventListener('hashchange', function () {
-            // Small delay to let the view render
             setTimeout(tryFillServerInput, 200);
             setTimeout(tryFillServerInput, 600);
         });
 
-        // Initial attempt
         tryFillServerInput();
     })();
 
@@ -616,7 +637,7 @@
             exit: function () {
                 postMessage('AppHost.exit');
                 stopBypass();
-                hideOverlay();
+                hideArtPage();
                 tizen.application.getCurrentApplication().exit();
             },
 
@@ -651,18 +672,10 @@
         updateMediaSession: function (mediaInfo) {
             debugLog('updateMediaSession: ' + (mediaInfo ? mediaInfo.title : 'null'));
             suppressScreenSaver();
-
-            if (mediaInfo) {
-                _currentMediaInfo = mediaInfo;
-                updateOverlayContent(mediaInfo);
-                // No auto-show — user opens via header button
-            }
         },
 
         hideMediaSession: function () {
             debugLog('hideMediaSession');
-            _currentMediaInfo = null;
-            hideOverlay();
             restoreScreenSaver();
         }
     };
@@ -692,28 +705,16 @@
                 startBypass();
             } else if (isVideoPlayback(el)) {
                 suppressScreenSaver();
-                hideOverlay();
+                hideArtPage();
             }
         });
 
         el.addEventListener('pause', function () {
-            if (isAudioElement(el)) {
-                _isPaused = true;
-                _playbackPosition = _playbackPosition + (Date.now() - _playbackStartTime);
-                _playbackStartTime = Date.now();
-                if (_overlay) {
-                    var btn = _overlay.querySelector('.tnp-btn-play');
-                    if (btn) btn.innerHTML = '&#x25B6;';
-                }
-            } else if (isVideoPlayback(el)) {
-                restoreScreenSaver();
-            }
+            if (isVideoPlayback(el)) restoreScreenSaver();
         });
 
         el.addEventListener('ended', function () {
-            if (isVideoPlayback(el)) {
-                restoreScreenSaver();
-            }
+            if (isVideoPlayback(el)) restoreScreenSaver();
         });
 
         el.addEventListener('emptied', function () {
@@ -725,7 +726,6 @@
         });
     }
 
-    // Watch for dynamically created media elements
     var observer = new MutationObserver(function (mutations) {
         mutations.forEach(function (m) {
             m.addedNodes.forEach(function (node) {
@@ -740,16 +740,16 @@
     });
 
     // ============================================================
-    // Key handling for overlay transport controls
+    // Key handling — intercept when art page is visible
     // ============================================================
 
     document.addEventListener('keydown', function (e) {
-        // Only intercept keys when our overlay is visible
-        if (!_overlayVisible) return;
+        if (!_artPageVisible) return;
 
         switch (e.keyCode) {
             case 415: // MediaPlay
             case 10252: // MediaPlayPause
+            case 13: // Enter/OK
                 execTransport('playpause');
                 e.preventDefault();
                 e.stopPropagation();
@@ -760,30 +760,25 @@
                 e.stopPropagation();
                 break;
             case 10232: // MediaTrackPrevious
-            case 10233: // MediaRewind (use as prev)
+            case 10233: // MediaRewind
                 execTransport('prev');
                 e.preventDefault();
                 e.stopPropagation();
                 break;
             case 10234: // MediaTrackNext
-            case 10228: // MediaFastForward (use as next)
+            case 10228: // MediaFastForward
                 execTransport('next');
                 e.preventDefault();
                 e.stopPropagation();
                 break;
-            case 10009: // Back button
+            case 10009: // Back
             case 27: // Escape
-                hideOverlay();
-                e.preventDefault();
-                e.stopPropagation();
-                break;
-            case 13: // Enter/OK — toggle play/pause
-                execTransport('playpause');
+                hideArtPage();
                 e.preventDefault();
                 e.stopPropagation();
                 break;
         }
-    }, true); // Use capture phase to intercept before jellyfin-web
+    }, true);
 
     // ============================================================
     // Initialization
@@ -803,7 +798,6 @@
         observer.observe(document.body, { childList: true, subtree: true });
 
         createBypassVideo();
-        createOverlay();
         watchForHeader();
     });
 
