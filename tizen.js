@@ -17,6 +17,73 @@
     }
 
     // ============================================================
+    // HLS.js Buffer Override
+    // ============================================================
+    //
+    // jellyfin-web 10.10.z ships with maxMaxBufferLength=6s which
+    // causes audio sticking/jumping on slow networks. Intercept the
+    // Hls constructor and increase buffer limits so the player can
+    // build up resilience over time.
+
+    (function patchHlsBuffer() {
+        var _RealHls = null;
+
+        function wrapHls(Original) {
+            if (Original._tizenPatched) return Original;
+
+            // Also patch DefaultConfig so any codepath reading defaults gets our values
+            if (Original.DefaultConfig) {
+                Original.DefaultConfig.maxMaxBufferLength = 120;
+                Original.DefaultConfig.maxBufferLength = 30;
+                Original.DefaultConfig.maxBufferSize = 60 * 1000 * 1000;
+            }
+
+            var Patched = function (config) {
+                var cfg = config || {};
+                // Allow up to 120s of forward buffer (default was capped at 6s)
+                if (!cfg.maxMaxBufferLength || cfg.maxMaxBufferLength < 120) {
+                    cfg.maxMaxBufferLength = 120;
+                }
+                // Ensure a healthy minimum buffer target of 30s
+                if (!cfg.maxBufferLength || cfg.maxBufferLength < 30) {
+                    cfg.maxBufferLength = 30;
+                }
+                // Allow up to 60MB buffer (default is often 30MB)
+                if (!cfg.maxBufferSize || cfg.maxBufferSize < 60 * 1000 * 1000) {
+                    cfg.maxBufferSize = 60 * 1000 * 1000;
+                }
+                debugLog('HLS buffer override: maxMaxBufferLength=' + cfg.maxMaxBufferLength +
+                    's, maxBufferLength=' + cfg.maxBufferLength +
+                    's, maxBufferSize=' + cfg.maxBufferSize);
+                return new Original(cfg);
+            };
+
+            // Copy static properties and prototype
+            Object.keys(Original).forEach(function (key) {
+                try { Patched[key] = Original[key]; } catch (e) {}
+            });
+            Patched.prototype = Original.prototype;
+            Patched._tizenPatched = true;
+
+            return Patched;
+        }
+
+        // Intercept Hls assignment on window (webpack bundles set window.Hls)
+        Object.defineProperty(window, 'Hls', {
+            configurable: true,
+            get: function () { return _RealHls; },
+            set: function (val) {
+                if (val && typeof val === 'function' && !val._tizenPatched) {
+                    _RealHls = wrapHls(val);
+                    debugLog('HLS.js constructor patched for larger buffers');
+                } else {
+                    _RealHls = val;
+                }
+            }
+        });
+    })();
+
+    // ============================================================
     // OLED Screensaver Bypass
     // ============================================================
 
@@ -286,10 +353,12 @@
             '.tap-time-tot{text-align:left;margin-left:14px}' +
             '.tap-bar{flex:1;height:4px;background:rgba(255,255,255,0.15);border-radius:2px;overflow:hidden}' +
             '.tap-bar-fill{height:100%;background:#00a4dc;border-radius:2px;width:0%;transition:width 1s linear}' +
-            '.tap-controls{display:flex;align-items:center;gap:40px}' +
-            '.tap-ctrl{font-size:36px;color:rgba(255,255,255,0.7);cursor:pointer;padding:10px;user-select:none;background:none;border:none;outline:none;font-family:inherit}' +
-            '.tap-ctrl-play{font-size:52px}' +
-            '.tap-ctrl:focus,.tap-ctrl:hover{color:#00a4dc}';
+            // Transport controls — match jellyfin-web button style for D-pad nav
+            '.tap-controls{display:flex;align-items:center;justify-content:center;gap:12px}' +
+            '.tap-controls button{background:none;border:none;padding:8px;cursor:pointer;outline:none;-webkit-tap-highlight-color:transparent}' +
+            '.tap-controls button .material-icons{font-size:42px;color:rgba(255,255,255,0.7)}' +
+            '.tap-controls button.tap-play-btn .material-icons{font-size:56px}' +
+            '.tap-controls button:focus .material-icons,.tap-controls button:hover .material-icons{color:#00a4dc}';
         document.head.appendChild(_artPageStyle);
 
         _artPage = document.createElement('div');
@@ -308,21 +377,26 @@
                     '<div class="tap-bar"><div class="tap-bar-fill"></div></div>' +
                     '<div class="tap-time tap-time-tot">0:00</div>' +
                 '</div>' +
-                '<div class="tap-controls">' +
-                    '<button class="tap-ctrl" data-action="prev">&#x23EE;</button>' +
-                    '<button class="tap-ctrl tap-ctrl-play" data-action="playpause">&#x23F8;</button>' +
-                    '<button class="tap-ctrl" data-action="next">&#x23ED;</button>' +
+                '<div class="tap-controls focuscontainer-x">' +
+                    '<button is="paper-icon-button-light" class="autoSize" data-action="prev" title="Previous Track">' +
+                        '<span class="material-icons skip_previous" aria-hidden="true"></span>' +
+                    '</button>' +
+                    '<button is="paper-icon-button-light" class="tap-play-btn autoSize" data-action="playpause" title="Play/Pause">' +
+                        '<span class="material-icons pause_circle_filled" aria-hidden="true"></span>' +
+                    '</button>' +
+                    '<button is="paper-icon-button-light" class="autoSize" data-action="next" title="Next Track">' +
+                        '<span class="material-icons skip_next" aria-hidden="true"></span>' +
+                    '</button>' +
                 '</div>' +
             '</div>';
 
         document.body.appendChild(_artPage);
 
-        // Transport control clicks
-        _artPage.addEventListener('click', function (e) {
-            var btn = e.target.closest('.tap-ctrl');
+        // Transport control clicks — delegate from container
+        _artPage.querySelector('.tap-controls').addEventListener('click', function (e) {
+            var btn = e.target.closest('button[data-action]');
             if (!btn) return;
-            var action = btn.getAttribute('data-action');
-            if (action) execTransport(action);
+            execTransport(btn.getAttribute('data-action'));
         });
     }
 
@@ -360,8 +434,10 @@
         _artPage.querySelector('.tap-time-tot').textContent = formatTicks(duration);
         _artPage.querySelector('.tap-bar-fill').style.width = pct + '%';
 
-        var playBtn = _artPage.querySelector('.tap-ctrl-play');
-        playBtn.innerHTML = playState.IsPaused ? '&#x25B6;' : '&#x23F8;';
+        var playIcon = _artPage.querySelector('.tap-play-btn .material-icons');
+        if (playIcon) {
+            playIcon.className = 'material-icons ' + (playState.IsPaused ? 'play_circle_filled' : 'pause_circle_filled');
+        }
     }
 
     function refreshArtPage() {
@@ -379,6 +455,10 @@
         ensureArtPageDOM();
         _artPage.classList.add('visible');
         _artPageVisible = true;
+
+        // Focus play button so D-pad navigation starts there
+        var playBtn = _artPage.querySelector('.tap-play-btn');
+        if (playBtn) playBtn.focus();
 
         // Fetch immediately and then poll every 2s
         refreshArtPage();
@@ -504,42 +584,12 @@
     // ============================================================
     // Server Address Pre-Fill
     // ============================================================
+    //
+    // Pre-fills the #txtServerHost input when the "Add Server" form
+    // appears. Does NOT seed jellyfin_credentials — the default URL
+    // is working so we only need the input pre-fill for new setups.
 
     (function preFillServer() {
-        var creds = localStorage.getItem('jellyfin_credentials');
-        var data = null;
-        try { data = creds ? JSON.parse(creds) : null; } catch (e) {}
-        if (!data) data = { Servers: [] };
-        if (!data.Servers) data.Servers = [];
-
-        var entry = null;
-        for (var i = 0; i < data.Servers.length; i++) {
-            if (data.Servers[i].ManualAddress === SERVER_URL ||
-                data.Servers[i].LocalAddress === SERVER_URL) {
-                entry = data.Servers[i];
-                break;
-            }
-        }
-        if (!entry) {
-            entry = {
-                Id: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'.replace(/x/g, function () {
-                    return (Math.random() * 16 | 0).toString(16);
-                }),
-                ManualAddress: SERVER_URL,
-                LocalAddress: SERVER_URL,
-                LastConnectionMode: 2,
-                manualAddressOnly: true
-            };
-            data.Servers.unshift(entry);
-        }
-        entry.Name = SERVER_NAME;
-        entry.ManualAddress = SERVER_URL;
-        entry.LocalAddress = SERVER_URL;
-        entry.DateLastAccessed = Date.now();
-        entry.LastConnectionMode = 2;
-
-        localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
-
         function tryFillServerInput() {
             var input = document.querySelector('#txtServerHost');
             if (input && !input.value) {
@@ -700,6 +750,11 @@
         if (el.id === 'tizen-screensaver-bypass') return;
         el._tizenListenersAttached = true;
 
+        // Encourage aggressive buffering for audio elements
+        if (isAudioElement(el)) {
+            el.preload = 'auto';
+        }
+
         el.addEventListener('playing', function () {
             if (isAudioElement(el)) {
                 startBypass();
@@ -749,7 +804,6 @@
         switch (e.keyCode) {
             case 415: // MediaPlay
             case 10252: // MediaPlayPause
-            case 13: // Enter/OK
                 execTransport('playpause');
                 e.preventDefault();
                 e.stopPropagation();
@@ -768,6 +822,20 @@
             case 10234: // MediaTrackNext
             case 10228: // MediaFastForward
                 execTransport('next');
+                e.preventDefault();
+                e.stopPropagation();
+                break;
+            case 13: // Enter/OK — let it activate the focused button naturally
+                break;
+            case 37: // ArrowLeft
+            case 39: // ArrowRight
+                // Let D-pad left/right navigate between transport buttons naturally
+                // but prevent underlying page from scrolling
+                e.stopPropagation();
+                break;
+            case 38: // ArrowUp
+            case 40: // ArrowDown
+                // Prevent vertical navigation from leaving the art page
                 e.preventDefault();
                 e.stopPropagation();
                 break;
