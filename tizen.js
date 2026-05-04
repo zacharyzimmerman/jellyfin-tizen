@@ -3,55 +3,19 @@
 
     console.log('Tizen adapter');
 
-    // On-screen debug overlay — shows log messages directly on the TV
-    var _debugOverlay = null;
-    var _debugLines = [];
-    var _MAX_DEBUG_LINES = 25;
+    // Debug logging — console only (no on-screen overlay)
     function debugLog(msg) {
         var text = typeof msg === 'object' ? JSON.stringify(msg) : String(msg);
-        var ts = new Date().toLocaleTimeString('en-US', { hour12: false }).substring(0, 8);
-        var line = ts + ' ' + text;
-        _debugLines.push(line);
-        if (_debugLines.length > _MAX_DEBUG_LINES) _debugLines.shift();
-        if (!_debugOverlay) {
-            _debugOverlay = document.createElement('div');
-            _debugOverlay.id = 'tizen-debug';
-            _debugOverlay.style.cssText = 'position:fixed;top:0;left:0;width:38%;max-height:90vh;overflow-y:auto;' +
-                'background:rgba(0,0,0,0.92);color:#0f0;font:12px/1.3 monospace;padding:6px;z-index:999999;' +
-                'pointer-events:none;white-space:pre-wrap;word-break:break-all;';
-            (document.body || document.documentElement).appendChild(_debugOverlay);
-        }
-        _debugOverlay.textContent = _debugLines.join('\n');
+        console.log('[TIZEN] ' + text);
     }
 
-    // Expose debugLog globally
-    window.__tizenDebug = debugLog;
-
-    // Intercept console.debug and console.error to capture diagnostics in overlay
-    var _origDebug = console.debug;
-    console.debug = function() {
-        _origDebug.apply(console, arguments);
-        var msg = Array.prototype.slice.call(arguments).join(' ');
-        if (msg.indexOf('[TIZEN') !== -1) {
-            debugLog(msg);
-        }
-    };
-    var _origError = console.error;
-    console.error = function() {
-        _origError.apply(console, arguments);
-        var msg = Array.prototype.slice.call(arguments).join(' ');
-        if (msg.indexOf('[TIZEN') !== -1 || msg.indexOf('MEDIA_ELEMENT') !== -1 || msg.indexOf('media element error') !== -1) {
-            debugLog('ERR: ' + msg);
-        }
-    };
-
     function postMessage() {
-        console.log.apply(console, arguments);
+        // Quiet — only log to console for remote debugging
         var parts = [];
         for (var a = 0; a < arguments.length; a++) {
             parts.push(typeof arguments[a] === 'object' ? JSON.stringify(arguments[a]) : String(arguments[a]));
         }
-        debugLog(parts.join(' '));
+        console.log('[TIZEN] ' + parts.join(' '));
     }
 
     // ============================================================
@@ -59,20 +23,15 @@
     // ============================================================
     //
     // Samsung OLED TVs have firmware-level burn-in protection that
-    // activates after ~2 minutes of static pixels, regardless of
-    // what apps request via setScreenSaver API. The only reliable
+    // activates after ~2 minutes of static pixels. The only reliable
     // way to prevent it is to have CHANGING PIXELS on the display.
     //
     // Strategy: When audio playback starts, show a fullscreen
     // <video> element behind the Jellyfin UI that loops a subtle
-    // dark animation (screensaver-bypass.mp4). The video content
-    // produces barely-visible pixel changes that tell the firmware
-    // real video is playing. Combined with setScreenSaver(OFF) and
-    // tizen.power.request() for belt-and-suspenders coverage.
+    // dark animation (screensaver-bypass.mp4). Combined with
+    // setScreenSaver(OFF) and tizen.power.request() as secondary.
     //
-    // screensaver-bypass.mp4 specs:
-    //   128x72, H.264 Baseline, 2fps, 60s loop, ~25KB
-    //   Dark sine-wave pattern (luma 16-45, barely visible on OLED)
+    // screensaver-bypass.mp4: 128x72 H.264 Baseline, 2fps, 60s, ~25KB
 
     var _bypassVideo = null;
     var _bypassActive = false;
@@ -88,20 +47,15 @@
         v.muted = true;
         v.loop = true;
         v.volume = 0;
-        // Position behind all UI content — Jellyfin UI has z-index layers
-        // but this sits at the very back
         v.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;' +
             'z-index:-1;object-fit:cover;pointer-events:none;opacity:1;';
         v.src = '../screensaver-bypass.mp4';
-
-        // Preload so it's ready when needed
         v.preload = 'auto';
         v.load();
 
         (document.body || document.documentElement).appendChild(v);
         _bypassVideo = v;
-
-        debugLog('[BYPASS] created bypass video element');
+        debugLog('bypass video element created');
         return v;
     }
 
@@ -111,27 +65,15 @@
 
         var v = createBypassVideo();
         v.style.display = 'block';
+        var p = v.play();
+        if (p && p.catch) p.catch(function () {});
 
-        var playPromise = v.play();
-        if (playPromise && playPromise.catch) {
-            playPromise.then(function () {
-                debugLog('[BYPASS] video playing');
-            }).catch(function (e) {
-                debugLog('[BYPASS] play failed: ' + e.message);
-            });
-        }
-
-        // Also suppress via API (belt and suspenders)
         suppressScreenSaver();
-
-        // Periodic API suppression every 30s
         if (!_screenSaverInterval) {
             _screenSaverInterval = setInterval(function () {
                 if (_bypassActive) suppressScreenSaver();
             }, 30000);
         }
-
-        debugLog('[BYPASS] started');
     }
 
     function stopBypass() {
@@ -142,46 +84,270 @@
             _bypassVideo.pause();
             _bypassVideo.style.display = 'none';
         }
-
         if (_screenSaverInterval) {
             clearInterval(_screenSaverInterval);
             _screenSaverInterval = null;
         }
-
         restoreScreenSaver();
-        debugLog('[BYPASS] stopped');
     }
 
     // ============================================================
-    // Screensaver API calls (secondary defense)
+    // Screensaver API (secondary defense)
     // ============================================================
 
     function suppressScreenSaver() {
         try {
             webapis.appcommon.setScreenSaver(
                 webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_OFF,
-                function () { /* quiet */ },
-                function (err) { debugLog('setScreenSaver OFF err: ' + JSON.stringify(err)); }
+                function () {},
+                function () {}
             );
-        } catch (e) { /* ignore */ }
-
-        try {
-            tizen.power.request('SCREEN', 'SCREEN_NORMAL');
-        } catch (e) { /* ignore */ }
+        } catch (e) {}
+        try { tizen.power.request('SCREEN', 'SCREEN_NORMAL'); } catch (e) {}
     }
 
     function restoreScreenSaver() {
         try {
             webapis.appcommon.setScreenSaver(
                 webapis.appcommon.AppCommonScreenSaverState.SCREEN_SAVER_ON,
-                function () { /* quiet */ },
-                function (err) { debugLog('setScreenSaver ON err: ' + JSON.stringify(err)); }
+                function () {},
+                function () {}
             );
-        } catch (e) { /* ignore */ }
+        } catch (e) {}
+        try { tizen.power.release('SCREEN'); } catch (e) {}
+    }
 
+    // ============================================================
+    // Now-Playing Overlay (album art screen)
+    // ============================================================
+    //
+    // Fullscreen overlay that shows album art, track info, and
+    // progress during audio playback. Displayed on top of the
+    // Jellyfin UI when audio is playing. The user can dismiss it
+    // with the Back button and re-show it from the now-playing bar.
+
+    var _overlay = null;
+    var _overlayVisible = false;
+    var _currentMediaInfo = null;
+    var _progressInterval = null;
+    var _playbackStartTime = 0;
+    var _playbackPosition = 0;
+    var _isPaused = false;
+
+    function createOverlay() {
+        if (_overlay) return _overlay;
+
+        var el = document.createElement('div');
+        el.id = 'tizen-now-playing';
+        el.innerHTML =
+            '<div class="tnp-bg"></div>' +
+            '<div class="tnp-content">' +
+                '<div class="tnp-art-wrap"><img class="tnp-art" src="" alt=""></div>' +
+                '<div class="tnp-info">' +
+                    '<div class="tnp-title"></div>' +
+                    '<div class="tnp-artist"></div>' +
+                    '<div class="tnp-album"></div>' +
+                '</div>' +
+                '<div class="tnp-progress-wrap">' +
+                    '<div class="tnp-time tnp-time-current">0:00</div>' +
+                    '<div class="tnp-bar"><div class="tnp-bar-fill"></div></div>' +
+                    '<div class="tnp-time tnp-time-total">0:00</div>' +
+                '</div>' +
+                '<div class="tnp-controls">' +
+                    '<div class="tnp-btn" data-action="prev">⏮</div>' +
+                    '<div class="tnp-btn tnp-btn-play" data-action="playpause">⏸</div>' +
+                    '<div class="tnp-btn" data-action="next">⏭</div>' +
+                '</div>' +
+            '</div>';
+
+        var style = document.createElement('style');
+        style.textContent =
+            '#tizen-now-playing {' +
+                'position:fixed;top:0;left:0;width:100vw;height:100vh;' +
+                'z-index:99999;display:none;' +
+            '}' +
+            '#tizen-now-playing.visible { display:flex; }' +
+            '.tnp-bg {' +
+                'position:absolute;top:0;left:0;width:100%;height:100%;' +
+                'background-size:cover;background-position:center;' +
+                'filter:blur(40px) brightness(0.3);' +
+                'transform:scale(1.2);' +
+            '}' +
+            '.tnp-content {' +
+                'position:relative;z-index:1;width:100%;height:100%;' +
+                'display:flex;flex-direction:column;align-items:center;justify-content:center;' +
+                'padding:40px;box-sizing:border-box;' +
+            '}' +
+            '.tnp-art-wrap {' +
+                'width:400px;height:400px;border-radius:8px;overflow:hidden;' +
+                'box-shadow:0 16px 48px rgba(0,0,0,0.6);margin-bottom:32px;' +
+                'background:#222;' +
+            '}' +
+            '.tnp-art {' +
+                'width:100%;height:100%;object-fit:cover;display:block;' +
+            '}' +
+            '.tnp-info {' +
+                'text-align:center;margin-bottom:24px;max-width:600px;' +
+            '}' +
+            '.tnp-title {' +
+                'font-size:28px;font-weight:600;color:#fff;' +
+                'margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
+            '}' +
+            '.tnp-artist {' +
+                'font-size:20px;color:rgba(255,255,255,0.8);' +
+                'margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
+            '}' +
+            '.tnp-album {' +
+                'font-size:16px;color:rgba(255,255,255,0.5);' +
+                'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
+            '}' +
+            '.tnp-progress-wrap {' +
+                'display:flex;align-items:center;width:500px;max-width:80vw;margin-bottom:24px;' +
+            '}' +
+            '.tnp-time {' +
+                'font-size:14px;color:rgba(255,255,255,0.6);min-width:44px;' +
+                'font-variant-numeric:tabular-nums;' +
+            '}' +
+            '.tnp-time-current { text-align:right;margin-right:12px; }' +
+            '.tnp-time-total { text-align:left;margin-left:12px; }' +
+            '.tnp-bar {' +
+                'flex:1;height:4px;background:rgba(255,255,255,0.2);border-radius:2px;' +
+                'overflow:hidden;' +
+            '}' +
+            '.tnp-bar-fill {' +
+                'height:100%;background:#00a4dc;border-radius:2px;width:0%;' +
+                'transition:width 1s linear;' +
+            '}' +
+            '.tnp-controls {' +
+                'display:flex;align-items:center;gap:32px;' +
+            '}' +
+            '.tnp-btn {' +
+                'font-size:32px;color:rgba(255,255,255,0.8);cursor:pointer;' +
+                'padding:8px;user-select:none;' +
+            '}' +
+            '.tnp-btn-play { font-size:44px; }' +
+            '.tnp-btn:focus,.tnp-btn:hover { color:#00a4dc; }';
+
+        document.head.appendChild(style);
+        (document.body || document.documentElement).appendChild(el);
+        _overlay = el;
+        return el;
+    }
+
+    function formatTime(ms) {
+        if (!ms || ms < 0) return '0:00';
+        var totalSec = Math.floor(ms / 1000);
+        var min = Math.floor(totalSec / 60);
+        var sec = totalSec % 60;
+        return min + ':' + (sec < 10 ? '0' : '') + sec;
+    }
+
+    function updateOverlayContent(info) {
+        if (!_overlay) createOverlay();
+
+        var art = _overlay.querySelector('.tnp-art');
+        var bg = _overlay.querySelector('.tnp-bg');
+        var title = _overlay.querySelector('.tnp-title');
+        var artist = _overlay.querySelector('.tnp-artist');
+        var album = _overlay.querySelector('.tnp-album');
+        var totalTime = _overlay.querySelector('.tnp-time-total');
+        var playBtn = _overlay.querySelector('.tnp-btn-play');
+
+        if (info.imageUrl) {
+            art.src = info.imageUrl;
+            bg.style.backgroundImage = 'url(' + info.imageUrl + ')';
+        } else {
+            art.src = '';
+            bg.style.backgroundImage = 'none';
+            bg.style.background = '#111';
+        }
+
+        title.textContent = info.title || '';
+        artist.textContent = info.artist || '';
+        album.textContent = info.album || '';
+        totalTime.textContent = formatTime(info.duration);
+
+        _isPaused = !!info.isPaused;
+        playBtn.textContent = _isPaused ? '▶' : '⏸';
+
+        if (typeof info.position === 'number') {
+            _playbackPosition = info.position;
+            _playbackStartTime = Date.now();
+        }
+        updateProgress();
+    }
+
+    function updateProgress() {
+        if (!_overlay || !_currentMediaInfo) return;
+
+        var elapsed = _isPaused ? 0 : (Date.now() - _playbackStartTime);
+        var current = _playbackPosition + elapsed;
+        var duration = _currentMediaInfo.duration || 1;
+        var pct = Math.min(100, (current / duration) * 100);
+
+        var fill = _overlay.querySelector('.tnp-bar-fill');
+        var curTime = _overlay.querySelector('.tnp-time-current');
+        if (fill) fill.style.width = pct + '%';
+        if (curTime) curTime.textContent = formatTime(current);
+    }
+
+    function showOverlay() {
+        if (!_overlay) createOverlay();
+        _overlay.classList.add('visible');
+        _overlayVisible = true;
+
+        if (!_progressInterval) {
+            _progressInterval = setInterval(updateProgress, 1000);
+        }
+    }
+
+    function hideOverlay() {
+        if (_overlay) _overlay.classList.remove('visible');
+        _overlayVisible = false;
+
+        if (_progressInterval) {
+            clearInterval(_progressInterval);
+            _progressInterval = null;
+        }
+    }
+
+    // Transport control helpers — try multiple API paths
+    function execTransport(action) {
+        debugLog('transport: ' + action);
         try {
-            tizen.power.release('SCREEN');
-        } catch (e) { /* ignore */ }
+            // jellyfin-web 10.10.x exposes playbackManager on Events object
+            // or as a requirejs module. Try known global paths:
+            var pm = null;
+
+            // Path 1: Emby global (common in 10.8+)
+            if (window.Emby && window.Emby.PlaybackManager) {
+                pm = window.Emby.PlaybackManager;
+            }
+
+            if (pm) {
+                switch (action) {
+                    case 'playpause': pm.playPause(); break;
+                    case 'next': pm.nextTrack(); break;
+                    case 'prev': pm.previousTrack(); break;
+                }
+                return;
+            }
+
+            // Path 2: Dispatch media key events (works with jellyfin-web's key handler)
+            var keyMap = {
+                'playpause': 'MediaPlayPause',
+                'next': 'MediaTrackNext',
+                'prev': 'MediaTrackPrevious'
+            };
+            if (keyMap[action]) {
+                document.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: keyMap[action],
+                    bubbles: true
+                }));
+            }
+        } catch (e) {
+            debugLog('transport error: ' + e.message);
+        }
     }
 
     // ============================================================
@@ -201,14 +367,13 @@
         return deviceId;
     }
 
-    // Ensure server address is pre-filled so the user doesn't have to type it
     var SERVER_URL = 'https://movies.great-tags.com';
     var SERVER_NAME = 'Jellyfin';
 
     (function preFillServer() {
         var creds = localStorage.getItem('jellyfin_credentials');
         var data = null;
-        try { data = creds ? JSON.parse(creds) : null; } catch (e) { /* ignore */ }
+        try { data = creds ? JSON.parse(creds) : null; } catch (e) {}
         if (!data) data = { Servers: [] };
         if (!data.Servers) data.Servers = [];
 
@@ -232,7 +397,6 @@
             };
             data.Servers.unshift(entry);
         }
-        // Always update these fields to keep the entry fresh
         entry.Name = SERVER_NAME;
         entry.ManualAddress = SERVER_URL;
         entry.LocalAddress = SERVER_URL;
@@ -241,26 +405,18 @@
 
         localStorage.setItem('jellyfin_credentials', JSON.stringify(data));
 
-        // Also write to the server input field if on the add-server page
-        // jellyfin-web 10.10.x uses #txtServerHost
         var prefillAttempts = 0;
         var prefillTimer = setInterval(function () {
             prefillAttempts++;
             var input = document.querySelector('#txtServerHost');
             if (input && !input.value) {
                 input.value = SERVER_URL;
-                var evt = new Event('input', { bubbles: true });
-                input.dispatchEvent(evt);
-                debugLog('[PREFILL] auto-filled #txtServerHost');
+                input.dispatchEvent(new Event('input', { bubbles: true }));
                 clearInterval(prefillTimer);
-            } else if (input && input.value) {
-                clearInterval(prefillTimer);
-            } else if (prefillAttempts >= 10) {
+            } else if ((input && input.value) || prefillAttempts >= 10) {
                 clearInterval(prefillTimer);
             }
         }, 500);
-
-        debugLog('[PREFILL] server entry saved: ' + SERVER_URL);
     })();
 
     var AppInfo = {
@@ -289,29 +445,20 @@
     var systeminfo;
 
     function getSystemInfo() {
-        if (systeminfo) {
-            return Promise.resolve(systeminfo);
-        }
+        if (systeminfo) return Promise.resolve(systeminfo);
 
         return new Promise(function (resolve) {
             tizen.systeminfo.getPropertyValue('DISPLAY', function (result) {
                 var devicePixelRatio = 1;
-
-                if (typeof webapis.productinfo.is8KPanelSupported === 'function' && webapis.productinfo.is8KPanelSupported()){
-                    console.log("8K UHD is supported");
+                if (typeof webapis.productinfo.is8KPanelSupported === 'function' && webapis.productinfo.is8KPanelSupported()) {
                     devicePixelRatio = 4;
-                } else if (typeof webapis.productinfo.isUdPanelSupported === 'function' && webapis.productinfo.isUdPanelSupported()){
-                    console.log("4K UHD is supported");
+                } else if (typeof webapis.productinfo.isUdPanelSupported === 'function' && webapis.productinfo.isUdPanelSupported()) {
                     devicePixelRatio = 2;
-                } else {
-                    console.log("UHD is not supported");
                 }
-
                 systeminfo = Object.assign({}, result, {
                     resolutionWidth: Math.floor(result.resolutionWidth * devicePixelRatio),
                     resolutionHeight: Math.floor(result.resolutionHeight * devicePixelRatio)
                 });
-
                 resolve(systeminfo);
             });
         });
@@ -326,44 +473,25 @@
                 });
             },
 
-            appName: function () {
-                postMessage('AppHost.appName', AppInfo.appName);
-                return AppInfo.appName;
-            },
-
-            appVersion: function () {
-                postMessage('AppHost.appVersion', AppInfo.appVersion);
-                return AppInfo.appVersion;
-            },
-
-            deviceId: function () {
-                postMessage('AppHost.deviceId', AppInfo.deviceId);
-                return AppInfo.deviceId;
-            },
-
-            deviceName: function () {
-                postMessage('AppHost.deviceName', AppInfo.deviceName);
-                return AppInfo.deviceName;
-            },
+            appName: function () { return AppInfo.appName; },
+            appVersion: function () { return AppInfo.appVersion; },
+            deviceId: function () { return AppInfo.deviceId; },
+            deviceName: function () { return AppInfo.deviceName; },
 
             exit: function () {
                 postMessage('AppHost.exit');
                 stopBypass();
+                hideOverlay();
                 tizen.application.getCurrentApplication().exit();
             },
 
-            getDefaultLayout: function () {
-                postMessage('AppHost.getDefaultLayout', 'tv');
-                return 'tv';
-            },
+            getDefaultLayout: function () { return 'tv'; },
 
             getDeviceProfile: function (profileBuilder) {
-                postMessage('AppHost.getDeviceProfile');
                 return profileBuilder({ enableMkvProgressive: false, enableSsaRender: true });
             },
 
             getSyncProfile: function (profileBuilder) {
-                postMessage('AppHost.getSyncProfile');
                 return profileBuilder({ enableMkvProgressive: false });
             },
 
@@ -375,52 +503,41 @@
             },
 
             supports: function (command) {
-                var isSupported = command && SupportedFeatures.indexOf(command.toLowerCase()) != -1;
-                postMessage('AppHost.supports', {
-                    command: command,
-                    isSupported: isSupported
-                });
-                return isSupported;
+                return command && SupportedFeatures.indexOf(command.toLowerCase()) !== -1;
             }
         },
 
-        downloadFile: function (url) {
-            postMessage('downloadFile', { url: url });
-        },
-
-        enableFullscreen: function () {
-            postMessage('enableFullscreen');
-        },
-
-        disableFullscreen: function () {
-            postMessage('disableFullscreen');
-        },
-
-        getPlugins: function () {
-            postMessage('getPlugins');
-            return [];
-        },
-
-        openUrl: function (url, target) {
-            postMessage('openUrl', {
-                url: url,
-                target: target
-            });
-        },
+        downloadFile: function () {},
+        enableFullscreen: function () {},
+        disableFullscreen: function () {},
+        getPlugins: function () { return []; },
+        openUrl: function () {},
 
         updateMediaSession: function (mediaInfo) {
-            postMessage('updateMediaSession', { mediaInfo: mediaInfo });
+            debugLog('updateMediaSession: ' + (mediaInfo ? mediaInfo.title : 'null'));
             suppressScreenSaver();
+
+            if (mediaInfo) {
+                _currentMediaInfo = mediaInfo;
+                updateOverlayContent(mediaInfo);
+
+                // Auto-show overlay on first play
+                if (!_overlayVisible && mediaInfo.action === 'play') {
+                    showOverlay();
+                }
+            }
         },
 
         hideMediaSession: function () {
-            postMessage('hideMediaSession');
+            debugLog('hideMediaSession');
+            _currentMediaInfo = null;
+            hideOverlay();
             restoreScreenSaver();
         }
     };
 
     // ============================================================
-    // Media element listeners — start/stop bypass video on audio
+    // Media element listeners — start/stop bypass on audio
     // ============================================================
 
     function isAudioElement(el) {
@@ -429,7 +546,6 @@
     }
 
     function isVideoPlayback(el) {
-        // Real video playback (movies, shows) — not our bypass video
         return el.nodeName === 'VIDEO' &&
             !el.classList.contains('mediaPlayerAudio') &&
             el.id !== 'tizen-screensaver-bypass';
@@ -437,59 +553,49 @@
 
     function attachMediaListeners(el) {
         if (el._tizenListenersAttached) return;
-        if (el.id === 'tizen-screensaver-bypass') return; // Skip our own bypass video
+        if (el.id === 'tizen-screensaver-bypass') return;
         el._tizenListenersAttached = true;
 
-        var tag = el.nodeName;
-        var classes = el.className || '';
-        debugLog('[MEDIA] attaching to <' + tag + '> class="' + classes + '"');
-
         el.addEventListener('playing', function () {
-            var src = (el.src || el.currentSrc || '').substring(0, 80);
-            debugLog('[MEDIA] <' + tag + '> playing — ' + src);
-
             if (isAudioElement(el)) {
-                // Audio playback — start bypass video for OLED
-                debugLog('[MEDIA] audio detected, starting bypass');
                 startBypass();
             } else if (isVideoPlayback(el)) {
-                // Real video — just suppress screensaver via API
                 suppressScreenSaver();
+                // Hide now-playing overlay during video playback
+                hideOverlay();
             }
         });
 
         el.addEventListener('pause', function () {
-            debugLog('[MEDIA] <' + tag + '> paused');
             if (isAudioElement(el)) {
-                stopBypass();
+                // Don't stop bypass on pause — user may resume
+                // Just update play/pause button
+                _isPaused = true;
+                _playbackPosition = _playbackPosition + (Date.now() - _playbackStartTime);
+                _playbackStartTime = Date.now();
+                if (_overlay) {
+                    var btn = _overlay.querySelector('.tnp-btn-play');
+                    if (btn) btn.textContent = '▶';
+                }
             } else if (isVideoPlayback(el)) {
                 restoreScreenSaver();
             }
         });
 
         el.addEventListener('ended', function () {
-            debugLog('[MEDIA] <' + tag + '> ended');
             if (isAudioElement(el)) {
-                stopBypass();
+                // Track ended — next track will trigger new updateMediaSession
             } else if (isVideoPlayback(el)) {
                 restoreScreenSaver();
             }
         });
 
         el.addEventListener('emptied', function () {
-            debugLog('[MEDIA] <' + tag + '> emptied');
             if (isAudioElement(el)) {
                 stopBypass();
             } else if (isVideoPlayback(el)) {
                 restoreScreenSaver();
             }
-        });
-
-        // Diagnostics
-        el.addEventListener('error', function () {
-            var code = el.error ? el.error.code : 0;
-            var msg = el.error ? el.error.message : '';
-            debugLog('[MEDIA] <' + tag + '> error: ' + code + ' ' + msg);
         });
     }
 
@@ -507,6 +613,56 @@
         });
     });
 
+    // ============================================================
+    // Key handling for overlay transport controls
+    // ============================================================
+
+    document.addEventListener('keydown', function (e) {
+        // Only intercept keys when our overlay is visible
+        if (!_overlayVisible) return;
+
+        switch (e.keyCode) {
+            case 415: // MediaPlay
+            case 10252: // MediaPlayPause
+                execTransport('playpause');
+                e.preventDefault();
+                e.stopPropagation();
+                break;
+            case 19: // MediaPause
+                execTransport('playpause');
+                e.preventDefault();
+                e.stopPropagation();
+                break;
+            case 10232: // MediaTrackPrevious
+            case 10233: // MediaRewind (use as prev)
+                execTransport('prev');
+                e.preventDefault();
+                e.stopPropagation();
+                break;
+            case 10234: // MediaTrackNext
+            case 10228: // MediaFastForward (use as next)
+                execTransport('next');
+                e.preventDefault();
+                e.stopPropagation();
+                break;
+            case 10009: // Back button
+            case 27: // Escape
+                hideOverlay();
+                e.preventDefault();
+                e.stopPropagation();
+                break;
+            case 13: // Enter/OK — toggle play/pause
+                execTransport('playpause');
+                e.preventDefault();
+                e.stopPropagation();
+                break;
+        }
+    }, true); // Use capture phase to intercept before jellyfin-web
+
+    // ============================================================
+    // Initialization
+    // ============================================================
+
     window.addEventListener('load', function () {
         tizen.tvinputdevice.registerKey('MediaPlay');
         tizen.tvinputdevice.registerKey('MediaPause');
@@ -515,13 +671,13 @@
         tizen.tvinputdevice.registerKey('MediaTrackNext');
         tizen.tvinputdevice.registerKey('MediaRewind');
         tizen.tvinputdevice.registerKey('MediaFastForward');
+        tizen.tvinputdevice.registerKey('MediaPlayPause');
 
         document.querySelectorAll('audio, video').forEach(attachMediaListeners);
         observer.observe(document.body, { childList: true, subtree: true });
 
-        // Pre-create the bypass video element (preloads the mp4)
         createBypassVideo();
-        debugLog('[INIT] bypass video preloaded');
+        createOverlay();
     });
 
     function updateKeys() {
